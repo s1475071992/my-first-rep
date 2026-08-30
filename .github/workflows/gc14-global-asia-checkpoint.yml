@@ -1,0 +1,28 @@
+name: gc14-global-asia-checkpoint
+
+on:
+  push:
+    branches:
+      - gc14-7-1-reference-producer-v1
+    paths:
+      - .github/workflows/gc14-global-asia-checkpoint.yml
+      - tests/test_global_asia_checkpoint_contract.py
+      - config/global_asia_checkpoint_case.json
+      - scripts/create_nested_asia_rundir.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --upgrade pytest
+      - name: Global Asia checkpoint contract
+        run: python -m pytest -q tests/test_global_asia_checkpoint_contract.py
