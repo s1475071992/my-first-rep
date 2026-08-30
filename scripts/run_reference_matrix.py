@@ -163,7 +163,16 @@ def main() -> int:
             ],
             env=env,
         )
-        run(["./download_data.py", "log.dryrun", "skip-download"], cwd=rundir, env=env, log=rundir / "download_data_skip.log")
+        # Upstream GCClassic 14.7.1 still dereferences the selected portal while
+        # generating the unique dry-run manifest, even with -skip-download.
+        # Supply the same official portal used by the real download so the
+        # manifest-only pass cannot fail with portal=None.
+        run(
+            ["./download_data.py", "log.dryrun", "geoschem+aws", "-skip-download"],
+            cwd=rundir,
+            env=env,
+            log=rundir / "download_data_skip.log",
+        )
         run(
             ["bash", str(control_root / "scripts/download_official_inputs.sh"), str(rundir), "geoschem+aws"],
             cwd=control_root,
