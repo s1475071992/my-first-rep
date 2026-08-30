@@ -5,9 +5,8 @@ import json
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def load_configure_module():
-    path = ROOT / "scripts/configure_reference_case.py"
-    spec = importlib.util.spec_from_file_location("configure_reference_case", path)
+def load_script(path: Path, name: str):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -21,6 +20,7 @@ def test_required_reference_producer_files_exist():
         "scripts/validate_dryrun.py",
         "scripts/write_provenance.py",
         "scripts/configure_reference_case.py",
+        "scripts/patch_history_for_window.py",
         "scripts/download_official_inputs.sh",
         "scripts/validate_reference_outputs.py",
         "scripts/package_gc_holdout.py",
@@ -61,14 +61,14 @@ def test_holdout_regions_are_frozen_and_nonempty():
 
 
 def test_one_hour_case_patches_speciesconc_history_to_one_hour(tmp_path):
-    module = load_configure_module()
+    module = load_script(ROOT / "scripts/patch_history_for_window.py", "patch_history_for_window")
     history = tmp_path / "HISTORY.rc"
     history.write_text(
         "SpeciesConc.frequency: 00000001 000000\n"
         "SpeciesConc.duration:  00000001 000000\n"
         "StateMet.frequency:    00000000 030000\n"
     )
-    module.patch_speciesconc_history(history, 3600)
+    module.patch_speciesconc(history, 3600)
     text = history.read_text()
     assert "SpeciesConc.frequency: 00000000 010000" in text
     assert "SpeciesConc.duration:  00000000 010000" in text
