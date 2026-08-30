@@ -93,6 +93,33 @@ def test_bc_history_patch_is_minimal_and_three_hourly():
         assert forbidden not in text
 
 
+def test_bc_history_patch_keeps_active_bc_block_adjacent_to_previous_terminator(tmp_path):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("patch_bc_history", PATCH_BC_HISTORY)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    history = tmp_path / "HISTORY.rc"
+    history.write_text(
+        "COLLECTIONS: 'Restart',\n"
+        "             'AdvFluxVert',\n"
+        "::\n"
+        "  AdvFluxVert.template: '%y4%m2%d2_%h2%n2z.nc4',\n"
+        "  AdvFluxVert.frequency: 00000100 000000\n"
+        "  AdvFluxVert.duration: 00000100 000000\n"
+        "  AdvFluxVert.mode: 'time-averaged'\n"
+        "  AdvFluxVert.fields: 'AdvFluxVert_?ADV?',\n"
+        "::\n"
+    )
+    module.patch(history)
+    text = history.read_text()
+    header = "#==============================================================================\n# %%%%% THE BoundaryConditions COLLECTION %%%%%"
+    assert f"::\n{header}" in text
+    assert f"::\n\n{header}" not in text
+
+
 def test_nested_bc_configurer_enables_gc_bcs_without_touching_numerics():
     assert CONFIGURE_NESTED_BC.exists(), "missing scripts/configure_nested_boundary_conditions.py"
     text = CONFIGURE_NESTED_BC.read_text()
