@@ -35,33 +35,28 @@ jobs:
           test "${#changed[@]}" -eq 1
           test "${changed[0]}" = ".github/workflows/replica-final-image-rerun.yml"
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install control-repo test dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install pytest numpy netCDF4 pyyaml
-
-      - name: Validate remote control repository Python and contracts
+      - name: Validate exact remote source snapshot
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p replica-evidence
+          python -m pip install --upgrade pip
+          python -m pip install pytest numpy netCDF4 pyyaml
           python -m compileall -q scripts tests 2>&1 | tee replica-evidence/compileall.log
           set +e
           python -m pytest -q tests 2>&1 | tee replica-evidence/pytest.log
           pytest_rc=${PIPESTATUS[0]}
           set -e
           printf '%s\n' "$pytest_rc" > replica-evidence/pytest.exitcode
-          # The pinned release commit contains one superseded nested-input contract test.
-          # Preserve its result as evidence, but do not edit frozen source or block the independent image rerun.
-          git rev-parse HEAD > replica-evidence/verification_branch_sha.txt
-          printf '%s\n' "$PINNED_CONTROL_SHA" > replica-evidence/pinned_control_sha.txt
+          python -m pytest -q tests/test_global_asia_checkpoint_contract.py 2>&1 | tee replica-evidence/release_gate_pytest.log
           git archive --format=tar.gz --prefix=my-first-rep-${PINNED_CONTROL_SHA}/ "$PINNED_CONTROL_SHA" > replica-evidence/remote-source-${PINNED_CONTROL_SHA}.tar.gz
           sha256sum replica-evidence/remote-source-${PINNED_CONTROL_SHA}.tar.gz > replica-evidence/remote-source-${PINNED_CONTROL_SHA}.tar.gz.sha256
+          printf '%s\n' "$PINNED_CONTROL_SHA" > replica-evidence/pinned_control_sha.txt
+          git rev-parse HEAD > replica-evidence/verification_branch_sha.txt
 
       - name: Login to GHCR read-only
         uses: docker/login-action@v3
@@ -107,62 +102,66 @@ jobs:
           PY
           ' 2>&1 | tee replica-evidence/static-image-validation.log
 
-      - name: Rerun Global and Asia hook-enabled cases from final image
+      - name: Rerun Global and Asia at original checkpoint paths
         shell: bash
         run: |
           set -euo pipefail
-          docker run --name torchctm-final-image-rerun --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
+          docker create --name torchctm-final-image-rerun --entrypoint /bin/bash "$FINAL_IMAGE" -lc 'sleep infinity' >/dev/null
+          docker start torchctm-final-image-rerun >/dev/null
+          set +e
+          docker exec torchctm-final-image-rerun /bin/bash -lc '
             set -euo pipefail
-            rm -rf /tmp/replica-rerun
-            mkdir -p /tmp/replica-rerun
+            E=/tmp/replica-evidence
+            rm -rf "$E" /tmp/frozen-global /tmp/frozen-nested
+            mkdir -p "$E"
+            cp -a /checkpoint/global/C /tmp/frozen-global
+            cp -a /checkpoint/nested/C /tmp/frozen-nested
 
-            prepare_case() {
-              local frozen="$1" exe="$2" dest="$3"
-              cp -a "$frozen" "$dest"
-              cp "$exe" "$dest/gcclassic"
-              chmod +x "$dest/gcclassic"
-              rm -rf "$dest/OutputDir" "$dest/audit_raw"
-              mkdir -p "$dest/OutputDir" "$dest/audit_raw"
-              rm -f "$dest/transport_audit.nc4" "$dest/transport_audit.manifest.json" "$dest/transport_audit_validation.json"
-              find "$dest/Restarts" -type f \
-                ! -name "*20190701_0000z*" \
-                ! -name "*201907010000*" -delete
+            reset_case() {
+              local d="$1"
+              rm -rf "$d/OutputDir" "$d/audit_raw"
+              mkdir -p "$d/OutputDir" "$d/audit_raw"
+              rm -f "$d/transport_audit.nc4" "$d/transport_audit.manifest.json" "$d/transport_audit_validation.json"
+              find "$d/Restarts" -type f ! -name "*20190701_0000z*" ! -name "*201907010000*" -delete
             }
 
-            prepare_case /checkpoint/global/C /checkpoint/software/global-instrumented/gcclassic /tmp/replica-rerun/global
-            cd /tmp/replica-rerun/global
-            GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/tmp/replica-rerun/global/audit_raw ./gcclassic > GC.rerun.log 2>&1
-            python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4
-            python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GLOBAL_LATLON --expected-steps 6 --expected-dt 600 --json-out transport_audit_validation.json
-            python3 /checkpoint/control-repo/scripts/compare_gc_scientific_outputs.py /checkpoint/global/C /tmp/replica-rerun/global --output /tmp/replica-rerun/global_vs_frozen.json
+            reset_case /checkpoint/global/C
+            cd /checkpoint/global/C
+            ./gcclassic --dryrun > "$E/global.dryrun.log" 2>&1
+            GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/checkpoint/global/C/audit_raw ./gcclassic > "$E/global.run.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4 > "$E/global.pack.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GLOBAL_LATLON --expected-steps 6 --expected-dt 600 --json-out transport_audit_validation.json > "$E/global.audit-validation.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/compare_gc_scientific_outputs.py /tmp/frozen-global /checkpoint/global/C --output "$E/global_vs_frozen.json" > "$E/global.compare.log" 2>&1
+            cp transport_audit_validation.json "$E/global_transport_audit_validation.json"
 
-            prepare_case /checkpoint/nested/C /checkpoint/software/asia-instrumented/gcclassic /tmp/replica-rerun/nested
-            cd /tmp/replica-rerun/nested
-            GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/tmp/replica-rerun/nested/audit_raw ./gcclassic > GC.rerun.log 2>&1
-            python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4
-            python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GEOSCHEM_NESTED_REGIONAL --expected-steps 12 --expected-dt 300 --json-out transport_audit_validation.json
-            python3 /checkpoint/control-repo/scripts/compare_gc_scientific_outputs.py /checkpoint/nested/C /tmp/replica-rerun/nested --output /tmp/replica-rerun/nested_vs_frozen.json
+            reset_case /checkpoint/nested/C
+            cd /checkpoint/nested/C
+            ./gcclassic --dryrun > "$E/nested.dryrun.log" 2>&1
+            GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/checkpoint/nested/C/audit_raw ./gcclassic > "$E/nested.run.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4 > "$E/nested.pack.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GEOSCHEM_NESTED_REGIONAL --expected-steps 12 --expected-dt 300 --json-out transport_audit_validation.json > "$E/nested.audit-validation.log" 2>&1
+            python3 /checkpoint/control-repo/scripts/compare_gc_scientific_outputs.py /tmp/frozen-nested /checkpoint/nested/C --output "$E/nested_vs_frozen.json" > "$E/nested.compare.log" 2>&1
+            cp transport_audit_validation.json "$E/nested_transport_audit_validation.json"
 
             python3 - <<"PY"
           import json
           from pathlib import Path
-          r=Path("/tmp/replica-rerun")
-          files=[
-            r/"global_vs_frozen.json",
-            r/"nested_vs_frozen.json",
-            r/"global/transport_audit_validation.json",
-            r/"nested/transport_audit_validation.json",
-          ]
-          data={p.name:json.loads(p.read_text()) for p in files}
-          assert all(x.get("status") == "PASS" for x in data.values()), data
-          (r/"RERUN_PASS").write_text("GLOBAL_AND_ASIA_FINAL_IMAGE_RERUN_PASS\n")
-          print(json.dumps(data,indent=2,sort_keys=True))
+          e=Path("/tmp/replica-evidence")
+          names=["global_vs_frozen.json","nested_vs_frozen.json","global_transport_audit_validation.json","nested_transport_audit_validation.json"]
+          data={n:json.loads((e/n).read_text()) for n in names}
+          assert all(v.get("status") == "PASS" for v in data.values()), data
+          (e/"RERUN_PASS").write_text("GLOBAL_AND_ASIA_FINAL_IMAGE_RERUN_PASS\n")
+          (e/"rerun_summary.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
           PY
-            rm -rf /tmp/replica-rerun/global/audit_raw /tmp/replica-rerun/nested/audit_raw
           '
-          docker cp torchctm-final-image-rerun:/tmp/replica-rerun ./replica-evidence/final-image-rerun
-          docker cp torchctm-final-image-rerun:/checkpoint/control-repo ./replica-evidence/final-image-control-repo
-          docker rm torchctm-final-image-rerun
+          rerun_rc=$?
+          set -e
+          mkdir -p replica-evidence/final-image-rerun
+          docker cp torchctm-final-image-rerun:/tmp/replica-evidence/. replica-evidence/final-image-rerun/ || true
+          docker cp torchctm-final-image-rerun:/checkpoint/control-repo replica-evidence/final-image-control-repo || true
+          docker rm -f torchctm-final-image-rerun >/dev/null || true
+          printf '%s\n' "$rerun_rc" > replica-evidence/final-image-rerun.exitcode
+          test "$rerun_rc" -eq 0
           test -f replica-evidence/final-image-rerun/RERUN_PASS
           test "$(git -C replica-evidence/final-image-control-repo rev-parse HEAD)" = "$PINNED_CONTROL_SHA"
           find replica-evidence/final-image-rerun -type f -print0 | sort -z | xargs -0 sha256sum > replica-evidence/final-image-rerun-SHA256SUMS.txt
