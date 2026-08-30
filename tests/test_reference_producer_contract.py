@@ -205,5 +205,5 @@ def test_matrix_validator_requires_four_seasons_and_twenty_region_cells(tmp_path
     payload = json.loads(broken.read_text())
     payload["regions"].pop("ARCTIC")
     broken.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="region order/set mismatch"):
+    with pytest.raises(ValueError, match="region set/count mismatch"):
         module.validate(matrix, root, expected_sha)
