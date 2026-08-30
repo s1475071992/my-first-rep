@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Audit a GCClassic nested dry-run without downloading scientific inputs.
+"""Audit a GCClassic nested dry-run without downloading nested scientific inputs.
 
-Required verdict families are MET, RESTART, BC, and DRYRUN. Remote object
-existence is probed against the official public gcgrid S3 HTTP endpoint.
-Every source path and derived official URL is retained in the JSON/TSV output.
+Required verdict families are MET, RESTART, BC, and DRYRUN. Remote MET/restart
+object existence is probed against the official public gcgrid S3 HTTP endpoint.
+A BC produced earlier in the same qualification workflow may resolve as an
+existing local generated file. Every source path and resolution mode is retained.
 """
 from __future__ import annotations
 
@@ -50,6 +51,22 @@ def remote_key(line: str) -> str | None:
     return None
 
 
+def local_existing_path(line: str) -> Path | None:
+    candidates = []
+    if "-->" in line:
+        left, right = line.split("-->", 1)
+        candidates.extend([left.strip(), right.strip()])
+    else:
+        candidates.append(line.strip())
+    for value in candidates:
+        if not value or value.startswith("http://") or value.startswith("https://"):
+            continue
+        p = Path(value).expanduser()
+        if p.is_file():
+            return p.resolve()
+    return None
+
+
 def probe(url: str, timeout: float) -> dict:
     headers = {"User-Agent": "gc14-nested-input-probe/1"}
     attempts = []
@@ -63,7 +80,7 @@ def probe(url: str, timeout: float) -> dict:
                     return {"resolvable": True, "http_status": code, "attempts": attempts}
         except urllib.error.HTTPError as e:
             attempts.append({"method": method, "status": int(e.code), "error": str(e)})
-        except Exception as e:  # network evidence is preserved verbatim
+        except Exception as e:
             attempts.append({"method": method, "status": None, "error": repr(e)})
     last = attempts[-1] if attempts else {"status": None}
     return {"resolvable": False, "http_status": last.get("status"), "attempts": attempts}
@@ -98,15 +115,34 @@ def main() -> int:
     for line in lines:
         family = classify(line)
         key = remote_key(line)
-        rec = {"family": family, "source_path": line, "remote_key": key, "remote_url": None}
-        if key is not None:
-            rec["remote_url"] = base + "/" + urllib.parse.quote(key, safe="/")
-        if family in FAMILIES and rec["remote_url"]:
-            rec.update(probe(rec["remote_url"], args.timeout))
+        local_path = local_existing_path(line) if family == "BC" else None
+        rec = {
+            "family": family,
+            "source_path": line,
+            "remote_key": key,
+            "remote_url": None,
+            "local_path": str(local_path) if local_path else None,
+            "resolution_mode": None,
+        }
+        if local_path is not None:
+            rec.update({
+                "resolvable": True,
+                "http_status": None,
+                "attempts": [],
+                "resolution_mode": "LOCAL_GENERATED_FILE",
+                "local_sha256": sha256(local_path),
+                "local_size_bytes": local_path.stat().st_size,
+            })
         else:
-            rec["resolvable"] = None
-            rec["http_status"] = None
-            rec["attempts"] = []
+            if key is not None:
+                rec["remote_url"] = base + "/" + urllib.parse.quote(key, safe="/")
+            if family in FAMILIES and rec["remote_url"]:
+                rec.update(probe(rec["remote_url"], args.timeout))
+                rec["resolution_mode"] = "OFFICIAL_GCGRID_HTTP"
+            else:
+                rec["resolvable"] = None
+                rec["http_status"] = None
+                rec["attempts"] = []
         records.append(rec)
 
     family_results = {}
@@ -151,17 +187,17 @@ def main() -> int:
         "path_record_count": len(records),
         "paths_and_urls": records,
         "SHA256": hashes,
-        "scientific_data_downloaded": False,
+        "nested_scientific_data_downloaded": False,
         "scientific_thresholds_modified": False,
     }
     Path(args.output).write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
 
     with Path(args.urls_output).open("w") as f:
-        f.write("family\tresolvable\thttp_status\tsource_path\tremote_url\n")
+        f.write("family\tresolvable\thttp_status\tresolution_mode\tsource_path\tremote_url\tlocal_path\n")
         for r in records:
             f.write(
-                f"{r['family']}\t{r['resolvable']}\t{r['http_status']}\t"
-                f"{r['source_path']}\t{r['remote_url'] or ''}\n"
+                f"{r['family']}\t{r['resolvable']}\t{r['http_status']}\t{r.get('resolution_mode')}\t"
+                f"{r['source_path']}\t{r['remote_url'] or ''}\t{r.get('local_path') or ''}\n"
             )
 
     print(json.dumps({
