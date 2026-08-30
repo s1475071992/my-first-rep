@@ -22,8 +22,19 @@ def replace_one(text: str, pattern: str, repl: str, label: str) -> str:
     return text2
 
 
-def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> None:
+def configure_history(
+    path: Path,
+    seconds: int,
+    boundary_conditions: bool,
+    file_duration_seconds: int = 3600,
+) -> None:
+    if file_duration_seconds < seconds:
+        raise ValueError('file duration must be >= sampling frequency')
+    if file_duration_seconds % seconds != 0:
+        raise ValueError('file duration must be an integer multiple of sampling frequency')
+
     freq = interval(seconds)
+    file_duration = interval(file_duration_seconds)
     text = path.read_text()
     collections = ["'Restart'", "'SpeciesConc'", "'StateMet'", "'StateMetLevEdge'"]
     if boundary_conditions:
@@ -31,9 +42,13 @@ def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> No
     block = 'COLLECTIONS: ' + ',\n             '.join(collections) + ',\n::'
     text = replace_one(text, r'^COLLECTIONS:.*?^::\s*$', block, 'COLLECTIONS')
 
+    # GCClassic 14.7.1 History_Netcdf_Define deliberately does not create the
+    # first file for an instantaneous collection when frequency == duration.
+    # Retained step-state collections therefore sample at the transport cadence
+    # but use a one-hour file window so that the t=0 file is defined and open.
     species = f"""  SpeciesConc.template:       '%y4%m2%d2_%h2%n2z.nc4',
   SpeciesConc.frequency:      {freq}
-  SpeciesConc.duration:       {freq}
+  SpeciesConc.duration:       {file_duration}
   SpeciesConc.mode:           'instantaneous'
   SpeciesConc.fields:         'SpeciesConcVV_?ALL?           ',
 ::"""
@@ -41,7 +56,7 @@ def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> No
 
     statemet = f"""  StateMet.template:          '%y4%m2%d2_%h2%n2z.nc4',
   StateMet.frequency:         {freq}
-  StateMet.duration:          {freq}
+  StateMet.duration:          {file_duration}
   StateMet.mode:              'instantaneous'
   StateMet.fields:            'Met_AD                        ',
                               'Met_DELPDRY                   ',
@@ -50,7 +65,7 @@ def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> No
 
     edges = f"""  StateMetLevEdge.template:    '%y4%m2%d2_%h2%n2z.nc4',
   StateMetLevEdge.frequency:   {freq}
-  StateMetLevEdge.duration:    {freq}
+  StateMetLevEdge.duration:    {file_duration}
   StateMetLevEdge.mode:        'instantaneous'
   StateMetLevEdge.fields:      'Met_PEDGEDRY                  ',
 ::"""
@@ -100,10 +115,16 @@ def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument('history')
     p.add_argument('--seconds', type=int, required=True)
+    p.add_argument('--file-duration-seconds', type=int, default=3600)
     p.add_argument('--boundary-conditions', action='store_true')
     p.add_argument('--hemco-diagn')
     args = p.parse_args()
-    configure_history(Path(args.history), args.seconds, args.boundary_conditions)
+    configure_history(
+        Path(args.history),
+        args.seconds,
+        args.boundary_conditions,
+        file_duration_seconds=args.file_duration_seconds,
+    )
     configure_hemco(Path(args.hemco_diagn) if args.hemco_diagn else None)
     print('instantaneous HISTORY/HEMCO output policy configured')
 
