@@ -1,0 +1,92 @@
+name: gc14-frozen-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - gc14-7-1-reference-producer-v1
+    paths:
+      - .github/workflows/gc14-build.yml
+      - scripts/bootstrap_gcclassic.sh
+      - scripts/create_transporttracers_rundir.sh
+      - scripts/package_frozen_gcclassic_build.sh
+
+permissions:
+  contents: read
+
+env:
+  PYTHONUNBUFFERED: "1"
+  WORKROOT: /tmp/gc14-reference
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pytest pyyaml
+      - name: Control-plane contract tests
+        run: python -m pytest -q tests/test_reference_producer_contract.py
+
+  build-gcclassic:
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout control repository
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential gfortran cmake make git libnetcdf-dev libnetcdff-dev netcdf-bin
+
+      - name: Bootstrap exact GCClassic 14.7.1 source
+        run: bash scripts/bootstrap_gcclassic.sh "$WORKROOT"
+
+      - name: Create frozen TransportTracers run-directory template
+        run: bash scripts/create_transporttracers_rundir.sh "$WORKROOT/GCClassic" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+
+      - name: Configure GCClassic once
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          mkdir -p "$RUNDIR/build"
+          cd "$RUNDIR/build"
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/cmake.log"
+
+      - name: Compile and install GCClassic once
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          cd "$RUNDIR/build"
+          make -j2 2>&1 | tee "$WORKROOT/build.log"
+          make install 2>&1 | tee "$WORKROOT/install.log"
+          test -x "$RUNDIR/gcclassic"
+          sha256sum "$RUNDIR/gcclassic" | tee "$WORKROOT/gcclassic.sha256"
+
+      - name: Package immutable frozen build
+        run: bash scripts/package_frozen_gcclassic_build.sh "$WORKROOT" "$WORKROOT/frozen-build"
+
+      - name: Verify frozen build package
+        run: |
+          cd "$WORKROOT/frozen-build"
+          sha256sum -c gc14-7-1-frozen-build.tar.gz.sha256
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          m = json.loads(Path('frozen_build_manifest.json').read_text())
+          assert m['build_run_id'] == int('${{ github.run_id }}')
+          assert m['gcclassic_version'] == '14.7.1'
+          assert m['gcclassic_sha'] == 'c36ecd760c6663a62769f05a7449c927b8faf54b'
+          assert m['geoschem_sha'] == 'b9f570e2c7a98b308004cd07e2985a12a47b6f5c'
+          assert len(m['executable_sha256']) == 64
+          PY
+
+      - name: Upload frozen GCClassic build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-7-1-frozen-build-${{ github.run_id }}
+          path: /tmp/gc14-reference/frozen-build/
+          compression-level: 0
+          retention-days: 90
