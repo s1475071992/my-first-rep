@@ -1,6 +1,7 @@
 from pathlib import Path
 import importlib.util
 import json
+import re
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,6 +18,7 @@ def test_required_reference_producer_files_exist():
     required = [
         "scripts/bootstrap_gcclassic.sh",
         "scripts/create_transporttracers_rundir.sh",
+        "scripts/package_frozen_gcclassic_build.sh",
         "scripts/validate_dryrun.py",
         "scripts/write_provenance.py",
         "scripts/configure_reference_case.py",
@@ -25,6 +27,9 @@ def test_required_reference_producer_files_exist():
         "scripts/validate_reference_outputs.py",
         "scripts/package_gc_holdout.py",
         "config/reference_matrix.json",
+        "config/frozen_gcclassic_build.json",
+        ".github/workflows/gc14-build.yml",
+        ".github/workflows/gc14-reference-producer.yml",
         "docs/GC_DISCREPANCY_AUDIT_PROTOCOL_V1.md",
     ]
     missing = [path for path in required if not (ROOT / path).is_file()]
@@ -100,14 +105,44 @@ def test_reference_case_allows_missing_restart_species_with_background_default(t
 
 
 def test_frozen_build_workflow_owns_compilation():
-    build_path = ROOT / ".github/workflows/gc14-build.yml"
-    package_path = ROOT / "scripts/package_frozen_gcclassic_build.sh"
-    assert build_path.is_file(), "missing dedicated GCClassic frozen-build workflow"
-    assert package_path.is_file(), "missing frozen-build packaging script"
-    text = build_path.read_text()
+    text = (ROOT / ".github/workflows/gc14-build.yml").read_text()
     assert "name: gc14-frozen-build" in text
     assert "bash scripts/bootstrap_gcclassic.sh" in text
     assert "cmake ../CodeDir" in text
     assert "make -j2" in text
     assert "gc14-7-1-frozen-build-${{ github.run_id }}" in text
     assert "actions/upload-artifact@v4" in text
+
+
+def test_frozen_build_pin_is_explicit_and_immutable():
+    pin = json.loads((ROOT / "config/frozen_gcclassic_build.json").read_text())
+    assert pin["schema_version"] == 1
+    assert isinstance(pin["build_run_id"], int) and pin["build_run_id"] > 0
+    assert pin["artifact_name"] == f"gc14-7-1-frozen-build-{pin['build_run_id']}"
+    assert pin["bundle_filename"] == "gc14-7-1-frozen-build.tar.gz"
+    assert re.fullmatch(r"[0-9a-f]{64}", pin["bundle_sha256"])
+    assert re.fullmatch(r"[0-9a-f]{64}", pin["executable_sha256"])
+    assert pin["gcclassic_version"] == "14.7.1"
+    assert pin["gcclassic_sha"] == "c36ecd760c6663a62769f05a7449c927b8faf54b"
+    assert pin["geoschem_sha"] == "b9f570e2c7a98b308004cd07e2985a12a47b6f5c"
+
+
+def test_reference_workflow_reuses_frozen_build_without_compiling():
+    text = (ROOT / ".github/workflows/gc14-reference-producer.yml").read_text()
+    assert "actions/download-artifact@v4" in text
+    assert "config/frozen_gcclassic_build.json" in text
+    assert "run-id: ${{ steps.frozen.outputs.run_id }}" in text
+    assert "sha256sum -c" in text
+    assert "frozen_build_manifest.json" in text
+    assert "Verify frozen executable identity" in text
+    forbidden = [
+        "bash scripts/bootstrap_gcclassic.sh",
+        "bash scripts/create_transporttracers_rundir.sh",
+        "cmake ../CodeDir",
+        "make -j2",
+        "make install",
+        "build-essential",
+        "gfortran",
+    ]
+    for marker in forbidden:
+        assert marker not in text, f"reference workflow must be run-only; found {marker!r}"

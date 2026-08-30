@@ -1,5 +1,5 @@
 name: gc14-reference-producer
-# Trigger frozen JJA smoke when reference-producer control/config changes.
+# Run-only reference producer: reuse one explicitly pinned frozen GCClassic build.
 
 on:
   push:
@@ -7,13 +7,21 @@ on:
       - gc14-7-1-reference-producer-v1
     paths:
       - .github/workflows/gc14-reference-producer.yml
+      - config/frozen_gcclassic_build.json
+      - config/reference_matrix.json
       - scripts/configure_reference_case.py
       - scripts/patch_history_for_window.py
+      - scripts/download_official_inputs.sh
+      - scripts/validate_dryrun.py
+      - scripts/validate_reference_outputs.py
+      - scripts/write_provenance.py
+      - scripts/package_gc_holdout.py
       - tests/test_reference_producer_contract.py
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 env:
   PYTHONUNBUFFERED: "1"
@@ -33,7 +41,7 @@ jobs:
   gcclassic-smoke:
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 120
     env:
       WORKROOT: /tmp/gc14-reference
       CASE_ID: GCEXT_JJA_20190701_SMOKE
@@ -41,24 +49,82 @@ jobs:
       - name: Checkout control repository
         uses: actions/checkout@v4
 
-      - name: Install build/runtime dependencies
+      - name: Install runtime dependencies only
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y build-essential gfortran cmake make git libnetcdf-dev libnetcdff-dev netcdf-bin curl wget
+          sudo apt-get install -y git libnetcdf-dev libnetcdff-dev netcdf-bin curl wget
           python -m pip install --upgrade pyyaml netCDF4 awscli
           {
-            echo "gfortran=$(gfortran --version | head -n 1)"
-            echo "cmake=$(cmake --version | head -n 1)"
+            echo "python=$(python --version 2>&1)"
             echo "netcdf_c=$(nc-config --version)"
             echo "netcdf_fortran=$(nf-config --version)"
             echo "aws=$(aws --version 2>&1)"
-          } | tee /tmp/toolchain.txt
+          } | tee /tmp/runtime_toolchain.txt
 
-      - name: Bootstrap exact GCClassic 14.7.1 source
-        run: bash scripts/bootstrap_gcclassic.sh "$WORKROOT"
+      - name: Read frozen GCClassic build pin
+        id: frozen
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          print(f"run_id={pin['build_run_id']}")
+          print(f"artifact_name={pin['artifact_name']}")
+          print(f"bundle_filename={pin['bundle_filename']}")
+          print(f"bundle_sha256={pin['bundle_sha256']}")
+          print(f"executable_sha256={pin['executable_sha256']}")
+          PY
 
-      - name: Create TransportTracers run directory
-        run: bash scripts/create_transporttracers_rundir.sh "$WORKROOT/GCClassic" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+      - name: Download exact frozen GCClassic build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.frozen.outputs.artifact_name }}
+          path: /tmp/gc14-reference/frozen-download
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.frozen.outputs.run_id }}
+
+      - name: Restore and verify frozen GCClassic build
+        run: |
+          DL="$WORKROOT/frozen-download"
+          BUNDLE="${{ steps.frozen.outputs.bundle_filename }}"
+          test -f "$DL/$BUNDLE"
+          test -f "$DL/$BUNDLE.sha256"
+          test -f "$DL/frozen_build_manifest.json"
+          cd "$DL"
+          echo "${{ steps.frozen.outputs.bundle_sha256 }}  $BUNDLE" | sha256sum -c -
+          sha256sum -c "$BUNDLE.sha256"
+          rm -rf "$WORKROOT/GCClassic" "$WORKROOT/provenance" "$WORKROOT/rundirs" "$WORKROOT/frozen_build_manifest.json"
+          tar -xzf "$DL/$BUNDLE" -C "$WORKROOT"
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          test -x "$RUNDIR/gcclassic"
+          test ! -d "$RUNDIR/build"
+          mkdir -p "$WORKROOT/ExtData" "$RUNDIR/OutputDir" "$RUNDIR/Restarts" "$HOME/.geoschem"
+          cat > "$HOME/.geoschem/config" <<EOF
+          export GC_DATA_ROOT=$WORKROOT/ExtData
+          export GC_USER_REGISTERED=true
+          EOF
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          manifest = json.loads(Path('/tmp/gc14-reference/frozen_build_manifest.json').read_text())
+          assert manifest['build_run_id'] == pin['build_run_id']
+          assert manifest['gcclassic_version'] == pin['gcclassic_version']
+          assert manifest['gcclassic_sha'] == pin['gcclassic_sha']
+          assert manifest['geoschem_sha'] == pin['geoschem_sha']
+          assert manifest['hemco_sha'] == pin['hemco_sha']
+          assert manifest['executable_sha256'] == pin['executable_sha256']
+          PY
+
+      - name: Verify frozen executable identity
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          actual=$(sha256sum "$RUNDIR/gcclassic" | awk '{print $1}')
+          expected="${{ steps.frozen.outputs.executable_sha256 }}"
+          echo "actual=$actual"
+          echo "expected=$expected"
+          test "$actual" = "$expected"
 
       - name: Freeze transport-only JJA smoke case
         run: |
@@ -71,21 +137,6 @@ jobs:
           python scripts/patch_history_for_window.py "$RUNDIR/HISTORY.rc" --seconds 3600
           grep -E '^[[:space:]]*SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
           grep -E '^[[:space:]]*\*[[:space:]]+SPC_[[:space:]].*SpeciesRst_.*[[:space:]]CYS[[:space:]]+xyz' "$RUNDIR/HEMCO_Config.rc"
-
-      - name: Configure GCClassic
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          mkdir -p "$RUNDIR/build"
-          cd "$RUNDIR/build"
-          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/cmake.log"
-
-      - name: Compile and install GCClassic
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          cd "$RUNDIR/build"
-          make -j2 2>&1 | tee "$WORKROOT/build.log"
-          make install 2>&1 | tee "$WORKROOT/install.log"
-          test -x "$RUNDIR/gcclassic"
 
       - name: Dry-run and freeze official input manifest
         run: |
@@ -134,13 +185,34 @@ jobs:
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
           mkdir -p "$WORKROOT/evidence/provenance" "$WORKROOT/evidence/rundir" "$WORKROOT/evidence/output"
-          cp /tmp/toolchain.txt "$WORKROOT/evidence/provenance/"
-          python scripts/write_provenance.py --gcclassic "$WORKROOT/GCClassic" --rundir "$RUNDIR" --output "$WORKROOT/evidence/provenance/reference_provenance.json"
+          cp /tmp/runtime_toolchain.txt "$WORKROOT/evidence/provenance/runtime_toolchain.txt"
+          cp "$WORKROOT/provenance/toolchain.txt" "$WORKROOT/evidence/provenance/build_toolchain.txt"
           cp "$WORKROOT/provenance/source_identity.txt" "$WORKROOT/evidence/provenance/"
           cp "$WORKROOT/provenance/submodules.txt" "$WORKROOT/evidence/provenance/"
+          cp config/frozen_gcclassic_build.json "$WORKROOT/evidence/provenance/"
+          cp "$WORKROOT/frozen_build_manifest.json" "$WORKROOT/evidence/provenance/"
+          python scripts/write_provenance.py --gcclassic "$WORKROOT/GCClassic" --rundir "$RUNDIR" --output "$WORKROOT/evidence/provenance/reference_provenance.json"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          out = Path('/tmp/gc14-reference/evidence/provenance/reference_provenance.json')
+          record = json.loads(out.read_text())
+          pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          manifest = json.loads(Path('/tmp/gc14-reference/frozen_build_manifest.json').read_text())
+          record['frozen_build'] = {
+              'reused_without_recompile': True,
+              'build_run_id': pin['build_run_id'],
+              'artifact_id': pin['artifact_id'],
+              'artifact_name': pin['artifact_name'],
+              'artifact_digest': pin['artifact_digest'],
+              'bundle_sha256': pin['bundle_sha256'],
+              'executable_sha256': pin['executable_sha256'],
+              'build_control_repo_sha': manifest['control_repo_sha'],
+          }
+          out.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+          PY
           cp "$RUNDIR/REFERENCE_CASE.json" "$RUNDIR/geoschem_config.yml" "$RUNDIR/HEMCO_Config.rc" "$RUNDIR/HISTORY.rc" "$RUNDIR/log.dryrun" "$RUNDIR/download_data_skip.log" "$RUNDIR/download_official_inputs.log" "$RUNDIR/log.dryrun.after_download" "$RUNDIR/GC.log" "$WORKROOT/evidence/rundir/"
           cp "$WORKROOT/validated/output_validation.json" "$WORKROOT/validated/final_restart.nc4" "$WORKROOT/evidence/output/"
-          cp "$WORKROOT/cmake.log" "$WORKROOT/build.log" "$WORKROOT/install.log" "$WORKROOT/evidence/"
           python scripts/package_gc_holdout.py --case-id "$CASE_ID" --source-dir "$WORKROOT/evidence" --output-dir "$WORKROOT/package"
 
       - name: Upload success evidence
@@ -158,9 +230,10 @@ jobs:
         with:
           name: gc14-7-1-jja-smoke-failure-${{ github.run_id }}
           path: |
-            /tmp/gc14-reference/cmake.log
-            /tmp/gc14-reference/build.log
-            /tmp/gc14-reference/install.log
+            config/frozen_gcclassic_build.json
+            /tmp/runtime_toolchain.txt
+            /tmp/gc14-reference/frozen-download/frozen_build_manifest.json
+            /tmp/gc14-reference/frozen_build_manifest.json
             /tmp/gc14-reference/provenance/
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/REFERENCE_CASE.json
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/geoschem_config.yml
