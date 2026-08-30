@@ -1,9 +1,6 @@
 name: gc14-input-probe
 
 on:
-  push:
-    branches:
-      - gc14-7-1-reference-producer-v1
   workflow_dispatch:
 
 permissions:
