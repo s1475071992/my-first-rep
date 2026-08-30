@@ -1,0 +1,31 @@
+name: gc14-transport-audit-build
+
+on:
+  push:
+    branches:
+      - gc14-7-1-reference-producer-v1
+    paths:
+      - .github/workflows/gc14-transport-audit-build.yml
+      - tests/test_transport_audit_patch_contract.py
+      - scripts/apply_transport_audit_patch.py
+      - scripts/pack_transport_audit.py
+      - scripts/validate_transport_audit.py
+      - scripts/compare_gc_scientific_outputs.py
+      - config/transport_audit_qualification.json
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install --upgrade pytest numpy netCDF4 pyyaml
+      - name: Transport audit contract
+        run: python -m pytest -q tests/test_transport_audit_patch_contract.py
