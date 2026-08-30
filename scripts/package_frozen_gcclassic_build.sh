@@ -80,7 +80,10 @@ PY
 
 cp "$MANIFEST" "$STAGE/frozen_build_manifest.json"
 tar -C "$STAGE" -czf "$BUNDLE" .
-sha256sum "$BUNDLE" | tee "$BUNDLE.sha256"
+(
+  cd "$OUTPUT_DIR"
+  sha256sum "$BUNDLE_NAME" | tee "$BUNDLE_NAME.sha256"
+)
 
 # The outer artifact contains only immutable build evidence and the bundle.
 rm -rf "$STAGE"
