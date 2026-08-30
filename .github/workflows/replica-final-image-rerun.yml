@@ -102,7 +102,7 @@ jobs:
           PY
           ' 2>&1 | tee replica-evidence/static-image-validation.log
 
-      - name: Rerun Global and Asia at original checkpoint paths
+      - name: Hydrate missing inputs and replay Global and Asia
         shell: bash
         run: |
           set -euo pipefail
@@ -127,7 +127,10 @@ jobs:
 
             reset_case /checkpoint/global/C
             cd /checkpoint/global/C
-            ./gcclassic --dryrun > "$E/global.dryrun.log" 2>&1
+            ./gcclassic --dryrun > log.dryrun 2>&1
+            cp log.dryrun "$E/global.dryrun.before_hydration.log"
+            bash /checkpoint/control-repo/scripts/download_official_inputs.sh /checkpoint/global/C geoschem+aws > "$E/global.input-hydration.log" 2>&1
+            cp log.dryrun.after_download "$E/global.dryrun.after_hydration.log"
             GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/checkpoint/global/C/audit_raw ./gcclassic > "$E/global.run.log" 2>&1
             python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4 > "$E/global.pack.log" 2>&1
             python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GLOBAL_LATLON --expected-steps 6 --expected-dt 600 --json-out transport_audit_validation.json > "$E/global.audit-validation.log" 2>&1
@@ -136,7 +139,10 @@ jobs:
 
             reset_case /checkpoint/nested/C
             cd /checkpoint/nested/C
-            ./gcclassic --dryrun > "$E/nested.dryrun.log" 2>&1
+            ./gcclassic --dryrun > log.dryrun 2>&1
+            cp log.dryrun "$E/nested.dryrun.before_hydration.log"
+            bash /checkpoint/control-repo/scripts/download_official_inputs.sh /checkpoint/nested/C nested+aws > "$E/nested.input-hydration.log" 2>&1
+            cp log.dryrun.after_download "$E/nested.dryrun.after_hydration.log"
             GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH=/checkpoint/nested/C/audit_raw ./gcclassic > "$E/nested.run.log" 2>&1
             python3 /checkpoint/control-repo/scripts/pack_transport_audit.py audit_raw transport_audit.nc4 > "$E/nested.pack.log" 2>&1
             python3 /checkpoint/control-repo/scripts/validate_transport_audit.py transport_audit.nc4 --domain GEOSCHEM_NESTED_REGIONAL --expected-steps 12 --expected-dt 300 --json-out transport_audit_validation.json > "$E/nested.audit-validation.log" 2>&1
@@ -150,7 +156,7 @@ jobs:
           names=["global_vs_frozen.json","nested_vs_frozen.json","global_transport_audit_validation.json","nested_transport_audit_validation.json"]
           data={n:json.loads((e/n).read_text()) for n in names}
           assert all(v.get("status") == "PASS" for v in data.values()), data
-          (e/"RERUN_PASS").write_text("GLOBAL_AND_ASIA_FINAL_IMAGE_RERUN_PASS\n")
+          (e/"RERUN_PASS").write_text("GLOBAL_AND_ASIA_FINAL_IMAGE_RERUN_PASS_AFTER_INPUT_HYDRATION\n")
           (e/"rerun_summary.json").write_text(json.dumps(data,indent=2,sort_keys=True)+"\n")
           PY
           '
