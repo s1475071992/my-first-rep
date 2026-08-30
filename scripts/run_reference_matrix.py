@@ -52,7 +52,8 @@ def assert_runtime_log(path: Path) -> None:
     found = [marker for marker in fatal if marker.lower() in text.lower()]
     if found:
         raise RuntimeError(f"runtime log contains fatal markers {found}: {path}")
-    if "END OF GEOS--CHEM" not in text:
+    normalized_lines = ["".join(line.split()).upper() for line in text.splitlines()]
+    if not any("ENDOFGEOS--CHEM" in line for line in normalized_lines):
         raise RuntimeError(f"runtime did not reach END OF GEOS--CHEM: {path}")
 
 
