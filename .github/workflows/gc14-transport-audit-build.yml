@@ -8,15 +8,17 @@ on:
       - .github/workflows/gc14-transport-audit-build.yml
       - tests/test_transport_audit_patch_contract.py
       - scripts/apply_transport_audit_patch.py
+      - scripts/configure_instantaneous_outputs.py
       - scripts/pack_transport_audit.py
       - scripts/validate_transport_audit.py
-      - scripts/compare_gc_scientific_outputs.py
-      - config/transport_audit_qualification.json
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
+
+env:
+  WORKROOT: /tmp/gc14-transport-audit-build
 
 jobs:
   contract:
@@ -29,3 +31,80 @@ jobs:
       - run: python -m pip install --upgrade pytest numpy netCDF4 pyyaml
       - name: Transport audit contract
         run: python -m pytest -q tests/test_transport_audit_patch_contract.py
+
+  instrumented-build:
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential gfortran cmake make git libnetcdf-dev libnetcdff-dev netcdf-bin
+      - name: Bootstrap exact GCClassic 14.7.1 source
+        run: bash scripts/bootstrap_gcclassic.sh "$WORKROOT"
+      - name: Apply diagnostic-only transport patch
+        run: |
+          python scripts/apply_transport_audit_patch.py "$WORKROOT/GCClassic/src/GEOS-Chem"
+          git -C "$WORKROOT/GCClassic/src/GEOS-Chem" status --short | tee "$WORKROOT/transport_audit_source_status.txt"
+          git -C "$WORKROOT/GCClassic/src/GEOS-Chem" diff -- GeosCore/CMakeLists.txt GeosCore/transport_mod.F90 GeosCore/tpcore_fvdas_mod.F90 GeosCore/tpcore_window_mod.F90 > "$WORKROOT/transport_audit.patch"
+          sha256sum scripts/apply_transport_audit_patch.py > "$WORKROOT/patcher.sha256"
+      - name: Create TransportTracers run directory
+        run: bash scripts/create_transporttracers_rundir.sh "$WORKROOT/GCClassic" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+      - name: Configure instrumented GCClassic
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          mkdir -p "$RUNDIR/build"
+          cd "$RUNDIR/build"
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/cmake.log"
+      - name: Compile and install instrumented GCClassic
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          cd "$RUNDIR/build"
+          make -j2 2>&1 | tee "$WORKROOT/build.log"
+          make install 2>&1 | tee "$WORKROOT/install.log"
+          test -x "$RUNDIR/gcclassic"
+          sha256sum "$RUNDIR/gcclassic" | tee "$WORKROOT/instrumented_gcclassic.sha256"
+      - name: Package instrumented executable and provenance
+        run: |
+          set -euo pipefail
+          OUT="$WORKROOT/package"
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          mkdir -p "$OUT"
+          cp "$RUNDIR/gcclassic" "$OUT/gcclassic"
+          cp "$WORKROOT/instrumented_gcclassic.sha256" "$OUT/"
+          cp "$WORKROOT/transport_audit_source_status.txt" "$OUT/"
+          cp "$WORKROOT/transport_audit.patch" "$OUT/"
+          cp "$WORKROOT/patcher.sha256" "$OUT/"
+          cp "$WORKROOT/provenance/source_identity.txt" "$OUT/"
+          cp "$WORKROOT/provenance/submodules.txt" "$OUT/"
+          cp "$WORKROOT/provenance/toolchain.txt" "$OUT/"
+          cp "$WORKROOT/cmake.log" "$OUT/"
+          cp "$WORKROOT/build.log" "$OUT/"
+          cp "$WORKROOT/install.log" "$OUT/"
+          cp "$WORKROOT/GCClassic/src/GEOS-Chem/GeosCore/transport_audit_mod.F90" "$OUT/"
+          python - <<'PY'
+          import hashlib, json, os, pathlib
+          out = pathlib.Path('/tmp/gc14-transport-audit-build/package')
+          exe = out / 'gcclassic'
+          manifest = {
+              'schema_id': 'GC14_7_1_TRANSPORT_DIAGNOSTIC_EXECUTABLE_V1',
+              'gcclassic_sha': 'c36ecd760c6663a62769f05a7449c927b8faf54b',
+              'geoschem_sha': 'b9f570e2c7a98b308004cd07e2985a12a47b6f5c',
+              'control_repo_sha': os.environ['GITHUB_SHA'],
+              'build_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'executable_sha256': hashlib.sha256(exe.read_bytes()).hexdigest(),
+              'patcher_sha256': hashlib.sha256(pathlib.Path('scripts/apply_transport_audit_patch.py').read_bytes()).hexdigest(),
+              'instrumentation_scope': 'MINIMAL_TRANSPORT_INTERNAL_ONLY',
+          }
+          (out/'instrumented_build_manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True)+'\n')
+          PY
+          (cd "$OUT" && sha256sum * > PACKAGE_SHA256SUMS)
+      - name: Upload instrumented build
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-transport-audit-build-${{ github.run_id }}
+          path: /tmp/gc14-transport-audit-build/package/
+          compression-level: 0
+          retention-days: 90
