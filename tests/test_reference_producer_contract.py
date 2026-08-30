@@ -60,16 +60,23 @@ def test_holdout_regions_are_frozen_and_nonempty():
     ]
 
 
-def test_one_hour_case_patches_speciesconc_history_to_one_hour(tmp_path):
+def test_one_hour_case_reduces_history_to_transport_audit_collections(tmp_path):
     module = load_script(ROOT / "scripts/patch_history_for_window.py", "patch_history_for_window")
     history = tmp_path / "HISTORY.rc"
     history.write_text(
+        "COLLECTIONS: 'Restart',\n"
+        "             'RadioNuclide',\n"
+        "             'SpeciesConc',\n"
+        "             'CloudConvFlux',\n"
+        "             'StateMet',\n"
+        "::\n"
         "SpeciesConc.frequency: 00000001 000000\n"
         "SpeciesConc.duration:  00000001 000000\n"
-        "StateMet.frequency:    00000000 030000\n"
+        "StateMet.frequency:    00000001 000000\n"
     )
-    module.patch_speciesconc(history, 3600)
+    module.patch_for_transport_audit(history, 3600)
     text = history.read_text()
+    assert "COLLECTIONS: 'Restart',\n             'SpeciesConc',\n::" in text
     assert "SpeciesConc.frequency: 00000000 010000" in text
     assert "SpeciesConc.duration:  00000000 010000" in text
-    assert "StateMet.frequency:    00000000 030000" in text
+    assert "StateMet.frequency:    00000001 000000" in text
