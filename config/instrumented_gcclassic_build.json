@@ -1,0 +1,15 @@
+{
+  "schema_id": "GC14_7_1_TRANSPORT_DIAGNOSTIC_EXECUTABLE_V1",
+  "build_run_id": 33313442142,
+  "artifact_id": 9732739336,
+  "artifact_name": "gc14-transport-audit-build-33313442142",
+  "artifact_digest": "sha256:9ae39e2ca6b0df200cb582153dc01e2fab575ad2737003c12b01f4a25a9fd834",
+  "executable_sha256": "02401f313896b7bb15fb4d088c04b2533588191617935840d4a54c78c0b403ce",
+  "patcher_sha256": "f06b53f3839b94f873d48128c8a13758b23c67edd3eeadaf352a61bf4bc2e208",
+  "gcclassic_sha": "c36ecd760c6663a62769f05a7449c927b8faf54b",
+  "geoschem_sha": "b9f570e2c7a98b308004cd07e2985a12a47b6f5c",
+  "hemco_sha": "07da3c29fd85abc3824cb6288578b0b68c2395a3",
+  "control_repo_sha": "0c2ecc26a8fd044ddb4dae0bd243e422396ac466",
+  "instrumentation_scope": "MINIMAL_TRANSPORT_INTERNAL_ONLY",
+  "scientific_thresholds_modified": false
+}
