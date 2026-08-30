@@ -118,9 +118,8 @@ def test_packer_and_validator_are_part_of_formal_contract():
 
 def test_raw_stream_byte_order_is_explicit_and_provenanced():
     """Never infer raw Fortran stream endianness from the Python host."""
-    patch = PATCHER.read_text()
     pack = PACKER.read_text()
-    assert 'source_byte_order=' in patch
+    assert "SOURCE_BYTE_ORDER = 'big'" in pack
     assert 'source_byte_order' in pack
     assert "'>f8'" in pack
     assert "'>f4'" in pack

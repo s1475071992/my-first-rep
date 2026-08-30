@@ -10,6 +10,10 @@ import numpy as np
 from netCDF4 import Dataset
 
 SCHEMA_ID = 'GC14_7_1_MINIMAL_TRANSPORT_AUDIT_V1'
+# The pinned GCClassic 14.7.1 producer writes unformatted stream REAL(fp)
+# payloads in big-endian byte order. Keep this explicit and provenance-visible;
+# never infer byte order from the Python host CPU.
+SOURCE_BYTE_ORDER = 'big'
 
 
 def read_meta(path: Path) -> dict[str, str]:
@@ -21,11 +25,23 @@ def read_meta(path: Path) -> dict[str, str]:
     return out
 
 
+def byte_order_for(meta: dict[str, str]) -> str:
+    order = meta.get('source_byte_order', SOURCE_BYTE_ORDER).lower()
+    if order not in ('big', 'little'):
+        raise ValueError(f'unsupported source_byte_order={order}')
+    return order
+
+
 def dtype_for(meta: dict[str, str]):
     n = int(meta['source_fp_bytes'])
-    if n == 8:
+    order = byte_order_for(meta)
+    if order == 'big' and n == 8:
+        return np.dtype('>f8')
+    if order == 'big' and n == 4:
+        return np.dtype('>f4')
+    if order == 'little' and n == 8:
         return np.dtype('<f8')
-    if n == 4:
+    if order == 'little' and n == 4:
         return np.dtype('<f4')
     raise ValueError(f'unsupported source_fp_bytes={n}')
 
@@ -63,6 +79,7 @@ def pack(raw: Path, output: Path) -> dict:
         raise ValueError(domain)
     nx, ny, nz, nedge = (int(first[k]) for k in ('nx','ny','nz','nedge'))
     source_fp_bytes = int(first['source_fp_bytes'])
+    source_byte_order = byte_order_for(first)
     dt = dtype_for(first)
 
     for expected, (step, meta) in enumerate(steps):
@@ -71,6 +88,8 @@ def pack(raw: Path, output: Path) -> dict:
         for k in ('domain_kind','nx','ny','nz','nedge','source_fp_bytes'):
             if meta[k] != first[k]:
                 raise RuntimeError(f'inconsistent {k} at step {step}')
+        if byte_order_for(meta) != source_byte_order:
+            raise RuntimeError(f'inconsistent source_byte_order at step {step}')
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with Dataset(output, 'w', format='NETCDF4') as ds:
@@ -78,6 +97,7 @@ def pack(raw: Path, output: Path) -> dict:
         ds.schema_version = 1
         ds.domain_kind = domain
         ds.source_fp_bytes = source_fp_bytes
+        ds.source_byte_order = source_byte_order
         ds.lev_tpcore = 'top_to_surface'
         ds.native_capture_only = 'true'
         ds.createDimension('step', len(steps))
@@ -113,6 +133,10 @@ def pack(raw: Path, output: Path) -> dict:
             ak = read_fortran(Path(str(prefix)+'ak.bin'), dt, (nedge,))
             bk = read_fortran(Path(str(prefix)+'bk.bin'), dt, (nedge,))
             if idx == 0:
+                if not (np.isfinite(ak).all() and np.isfinite(bk).all()):
+                    raise RuntimeError('non-finite hybrid coordinates; check source byte order')
+                if not (np.min(bk) >= 0.0 and np.max(bk) <= 1.0):
+                    raise RuntimeError('hybrid B outside [0,1]; check source byte order')
                 vak[:] = ak.astype(np.float64, copy=False)
                 vbk[:] = bk.astype(np.float64, copy=False)
             else:
@@ -133,6 +157,7 @@ def pack(raw: Path, output: Path) -> dict:
         'step_count': len(steps),
         'runtime_dt_s': [float(m['runtime_dt_s']) for _, m in steps],
         'source_fp_bytes': source_fp_bytes,
+        'source_byte_order': source_byte_order,
         'output': str(output),
     }
     output.with_suffix('.manifest.json').write_text(json.dumps(manifest, indent=2, sort_keys=True) + '\n')
