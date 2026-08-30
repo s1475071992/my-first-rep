@@ -9,20 +9,490 @@ on:
       - tests/test_global_asia_checkpoint_contract.py
       - config/global_asia_checkpoint_case.json
       - scripts/create_nested_asia_rundir.sh
+      - scripts/apply_transport_audit_patch.py
+      - scripts/configure_instantaneous_outputs.py
+      - scripts/configure_nested_boundary_conditions.py
+      - scripts/pack_transport_audit.py
+      - scripts/validate_transport_audit.py
+      - scripts/compare_gc_scientific_outputs.py
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
+  packages: write
+
+concurrency:
+  group: gc14-global-asia-checkpoint-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  WORKROOT: /tmp/gc14-global-asia-checkpoint
+  PYTHONUNBUFFERED: "1"
+  CHECKPOINT_REPO: ghcr.io/s1475071992/gcclassic-paper1-checkpoint
+  CHECKPOINT_TAG: 14.7.1-global-asia-v1-run-${{ github.run_id }}
+  PARENT_IMAGE: ghcr.io/s1475071992/gcclassic-reference@sha256:209a95291bdcf009390eb2a57d298a1fe1c354546a7b55408c252b89a9574518
 
 jobs:
-  contract:
-    runs-on: ubuntu-latest
+  produce:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout control repository
+        uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
-      - run: python -m pip install --upgrade pytest
+          python-version: "3.11"
+
+      - name: Install runtime and build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y build-essential gfortran cmake make git libnetcdf-dev libnetcdff-dev netcdf-bin rsync jq
+          python -m pip install --upgrade pytest numpy netCDF4 pyyaml
+          command -v aws
+          command -v docker
+
       - name: Global Asia checkpoint contract
         run: python -m pytest -q tests/test_global_asia_checkpoint_contract.py
+
+      - name: Read frozen GLOBAL build pins
+        id: pins
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          base=json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          inst=json.loads(Path('config/instrumented_gcclassic_build.json').read_text())
+          vals={
+              'base_run':base['build_run_id'],
+              'base_artifact':base['artifact_name'],
+              'base_bundle':base['bundle_filename'],
+              'base_bundle_sha':base['bundle_sha256'],
+              'base_exe_sha':base['executable_sha256'],
+              'inst_run':inst['build_run_id'],
+              'inst_artifact':inst['artifact_name'],
+              'inst_exe_sha':inst['executable_sha256'],
+          }
+          for k,v in vals.items(): print(f'{k}={v}')
+          PY
+
+      - name: Download frozen GLOBAL baseline build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pins.outputs.base_artifact }}
+          path: ${{ env.WORKROOT }}/baseline-download
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pins.outputs.base_run }}
+
+      - name: Download frozen GLOBAL instrumented build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pins.outputs.inst_artifact }}
+          path: ${{ env.WORKROOT }}/global-instrumented
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pins.outputs.inst_run }}
+
+      - name: Restore and verify GLOBAL software
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/software/global-baseline" "$WORKROOT/software/global-instrumented"
+          DL="$WORKROOT/baseline-download"
+          BUNDLE="${{ steps.pins.outputs.base_bundle }}"
+          echo "${{ steps.pins.outputs.base_bundle_sha }}  $DL/$BUNDLE" | sha256sum -c -
+          tar -xzf "$DL/$BUNDLE" -C "$WORKROOT/frozen"
+          BASE="$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers/gcclassic"
+          INST="$WORKROOT/global-instrumented/gcclassic"
+          test "$(sha256sum "$BASE" | awk '{print $1}')" = "${{ steps.pins.outputs.base_exe_sha }}"
+          test "$(sha256sum "$INST" | awk '{print $1}')" = "${{ steps.pins.outputs.inst_exe_sha }}"
+          cp "$BASE" "$WORKROOT/software/global-baseline/gcclassic"
+          cp "$INST" "$WORKROOT/software/global-instrumented/gcclassic"
+          chmod +x "$WORKROOT/software/global-baseline/gcclassic" "$WORKROOT/software/global-instrumented/gcclassic"
+          sha256sum "$WORKROOT/software/global-baseline/gcclassic" > "$WORKROOT/software/global-baseline/gcclassic.sha256"
+          sha256sum "$WORKROOT/software/global-instrumented/gcclassic" > "$WORKROOT/software/global-instrumented/gcclassic.sha256"
+          ldd "$BASE" > "$WORKROOT/software/global-baseline/ldd.txt"
+          ldd "$INST" > "$WORKROOT/software/global-instrumented/ldd.txt"
+          mkdir -p "$HOME/.geoschem"
+          printf 'export GC_DATA_ROOT=%s\nexport GC_USER_REGISTERED=true\n' "$WORKROOT/ExtData" > "$HOME/.geoschem/config"
+          echo "GC_DATA_ROOT=$WORKROOT/ExtData" >> "$GITHUB_ENV"
+          echo "GC_USER_REGISTERED=true" >> "$GITHUB_ENV"
+          rm -rf "$WORKROOT/baseline-download"
+
+      - name: Prepare GLOBAL A/B/C identical configurations
+        run: |
+          set -euo pipefail
+          ROOT="$WORKROOT/global"
+          TEMPLATE="$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers"
+          rm -rf "$ROOT"; mkdir -p "$ROOT"; cp -a "$TEMPLATE" "$ROOT/A"
+          rm -rf "$ROOT/A/OutputDir" "$ROOT/A/Restarts"; mkdir -p "$ROOT/A/OutputDir" "$ROOT/A/Restarts"
+          python scripts/configure_reference_case.py --rundir "$ROOT/A" --case-id GCNOOP_GLOBAL_JJA_20190701_V1 --start 20190701T000000 --end 20190701T010000
+          python scripts/configure_instantaneous_outputs.py "$ROOT/A/HISTORY.rc" --seconds 600 --hemco-diagn "$ROOT/A/HEMCO_Diagn.rc"
+          cp -a "$ROOT/A" "$ROOT/B"; cp -a "$ROOT/A" "$ROOT/C"
+          cp "$WORKROOT/software/global-instrumented/gcclassic" "$ROOT/B/gcclassic"
+          cp "$WORKROOT/software/global-instrumented/gcclassic" "$ROOT/C/gcclassic"
+          chmod +x "$ROOT/B/gcclassic" "$ROOT/C/gcclassic"
+          for x in A B C; do
+            rm -rf "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"
+            mkdir -p "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"
+          done
+          for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc; do cmp "$ROOT/A/$f" "$ROOT/B/$f"; cmp "$ROOT/B/$f" "$ROOT/C/$f"; done
+          grep -q "SpeciesConc.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+          grep -q "StateMet.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+          grep -q "StateMetLevEdge.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+
+      - name: Download official GLOBAL inputs once
+        run: |
+          cd "$WORKROOT/global/A"
+          ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/download_official_inputs.sh "$WORKROOT/global/A" geoschem+aws
+
+      - name: Run and validate GLOBAL A/B/C
+        run: |
+          set -euo pipefail
+          cd "$WORKROOT/global/A"
+          env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          cd "$WORKROOT/global/B"
+          env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          mkdir -p "$WORKROOT/global/C/audit_raw"
+          cd "$WORKROOT/global/C"
+          GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH="$WORKROOT/global/C/audit_raw" ./gcclassic > GC.log 2>&1
+          cd "$GITHUB_WORKSPACE"
+          python scripts/pack_transport_audit.py "$WORKROOT/global/C/audit_raw" "$WORKROOT/global/C/transport_audit.nc4"
+          python scripts/validate_transport_audit.py "$WORKROOT/global/C/transport_audit.nc4" --domain GLOBAL_LATLON --expected-steps 6 --expected-dt 600 --json-out "$WORKROOT/global/C/transport_audit_validation.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/A" "$WORKROOT/global/B" --output "$WORKROOT/global/A_vs_B.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/B" "$WORKROOT/global/C" --output "$WORKROOT/global/B_vs_C.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/A" "$WORKROOT/global/C" --output "$WORKROOT/global/A_vs_C.json"
+          for x in A B; do
+            find "$WORKROOT/global/$x/OutputDir" "$WORKROOT/global/$x/Restarts" -type f -print0 | sort -z | xargs -0 -r sha256sum > "$WORKROOT/global/${x}_scientific_output_SHA256SUMS"
+          done
+          touch "$WORKROOT/global/GLOBAL_VALIDATION_PASS"
+          rm -rf "$WORKROOT/global/C/audit_raw"
+
+      - name: Produce GLOBAL BoundaryConditions
+        id: bc
+        run: |
+          set -euo pipefail
+          BCROOT="$WORKROOT/bc-producer"
+          cp -a "$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers" "$BCROOT"
+          rm -rf "$BCROOT/OutputDir" "$BCROOT/Restarts"; mkdir -p "$BCROOT/OutputDir" "$BCROOT/Restarts"
+          python scripts/configure_reference_case.py --rundir "$BCROOT" --case-id GCNOOP_BC_GLOBAL_JJA_20190701_V1 --start 20190701T000000 --end 20190701T030000
+          python scripts/configure_instantaneous_outputs.py "$BCROOT/HISTORY.rc" --seconds 600 --boundary-conditions --hemco-diagn "$BCROOT/HEMCO_Diagn.rc"
+          cd "$BCROOT"; ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"; bash scripts/download_official_inputs.sh "$BCROOT" geoschem+aws
+          cd "$BCROOT"; ./gcclassic > GC.log 2>&1
+          mapfile -t bcs < <(find OutputDir -maxdepth 1 -type f -name 'GEOSChem.BoundaryConditions.*.nc4' | sort)
+          test "${#bcs[@]}" -ge 1
+          BC=$(realpath "${bcs[0]}")
+          grep -q 'SpeciesBC_PassiveTracer' <(ncdump -h "$BC")
+          SHA=$(sha256sum "$BC" | awk '{print $1}')
+          echo "path=$BC" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          printf '%s  %s\n' "$SHA" "$BC" > "$WORKROOT/bc-producer/BC_SHA256.txt"
+          touch "$WORKROOT/bc-producer/BC_VALIDATION_PASS"
+
+      - name: Bootstrap exact source for Asia
+        run: |
+          set -euo pipefail
+          test -f "$WORKROOT/global/GLOBAL_VALIDATION_PASS"
+          test -f "$WORKROOT/bc-producer/BC_VALIDATION_PASS"
+          bash scripts/bootstrap_gcclassic.sh "$WORKROOT/asia-source"
+          mkdir -p "$WORKROOT/software/asia-baseline" "$WORKROOT/software/asia-instrumented" "$WORKROOT/asia-build-logs"
+          cp -a "$WORKROOT/asia-source/provenance" "$WORKROOT/asia-build-logs/source-provenance"
+
+      - name: Compile Asia baseline executable
+        id: asia_base
+        run: |
+          set -euo pipefail
+          PARENT="$WORKROOT/asia-baseline"
+          mkdir -p "$PARENT"
+          RUNDIR=$(bash scripts/create_nested_asia_rundir.sh "$WORKROOT/asia-source/GCClassic" "$WORKROOT/ExtData" "$PARENT" | tail -n 1)
+          mkdir -p "$RUNDIR/build"
+          cd "$RUNDIR/build"
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/asia-build-logs/baseline-cmake.log"
+          make -j2 2>&1 | tee "$WORKROOT/asia-build-logs/baseline-build.log"
+          make install 2>&1 | tee "$WORKROOT/asia-build-logs/baseline-install.log"
+          test -x "$RUNDIR/gcclassic"
+          cp "$RUNDIR/gcclassic" "$WORKROOT/software/asia-baseline/gcclassic"
+          chmod +x "$WORKROOT/software/asia-baseline/gcclassic"
+          sha256sum "$WORKROOT/software/asia-baseline/gcclassic" > "$WORKROOT/software/asia-baseline/gcclassic.sha256"
+          ldd "$WORKROOT/software/asia-baseline/gcclassic" > "$WORKROOT/software/asia-baseline/ldd.txt"
+          echo "rundir=$RUNDIR" >> "$GITHUB_OUTPUT"
+
+      - name: Compile Asia instrumented executable
+        id: asia_inst
+        run: |
+          set -euo pipefail
+          python scripts/apply_transport_audit_patch.py "$WORKROOT/asia-source/GCClassic/src/GEOS-Chem"
+          git -C "$WORKROOT/asia-source/GCClassic/src/GEOS-Chem" diff -- GeosCore/CMakeLists.txt GeosCore/transport_mod.F90 GeosCore/tpcore_fvdas_mod.F90 GeosCore/tpcore_window_mod.F90 > "$WORKROOT/asia-build-logs/transport_audit.patch"
+          cp "$WORKROOT/asia-source/GCClassic/src/GEOS-Chem/GeosCore/transport_audit_mod.F90" "$WORKROOT/asia-build-logs/transport_audit_mod.F90"
+          PARENT="$WORKROOT/asia-instrumented"
+          mkdir -p "$PARENT"
+          RUNDIR=$(bash scripts/create_nested_asia_rundir.sh "$WORKROOT/asia-source/GCClassic" "$WORKROOT/ExtData" "$PARENT" | tail -n 1)
+          mkdir -p "$RUNDIR/build"
+          cd "$RUNDIR/build"
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/asia-build-logs/instrumented-cmake.log"
+          make -j2 2>&1 | tee "$WORKROOT/asia-build-logs/instrumented-build.log"
+          make install 2>&1 | tee "$WORKROOT/asia-build-logs/instrumented-install.log"
+          test -x "$RUNDIR/gcclassic"
+          cp "$RUNDIR/gcclassic" "$WORKROOT/software/asia-instrumented/gcclassic"
+          chmod +x "$WORKROOT/software/asia-instrumented/gcclassic"
+          sha256sum "$WORKROOT/software/asia-instrumented/gcclassic" > "$WORKROOT/software/asia-instrumented/gcclassic.sha256"
+          ldd "$WORKROOT/software/asia-instrumented/gcclassic" > "$WORKROOT/software/asia-instrumented/ldd.txt"
+          echo "rundir=$RUNDIR" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare Asia NESTED A/B/C identical configurations
+        run: |
+          set -euo pipefail
+          TEMPLATE="${{ steps.asia_base.outputs.rundir }}"
+          rm -rf "$TEMPLATE/build"
+          python scripts/configure_instantaneous_outputs.py "$TEMPLATE/HISTORY.rc" --seconds 300 --hemco-diagn "$TEMPLATE/HEMCO_Diagn.rc"
+          python scripts/configure_nested_boundary_conditions.py --hemco "$TEMPLATE/HEMCO_Config.rc" --boundary-file "${{ steps.bc.outputs.path }}"
+          ROOT="$WORKROOT/nested"
+          rm -rf "$ROOT"; mkdir -p "$ROOT"
+          cp -a "$TEMPLATE" "$ROOT/A"; cp -a "$TEMPLATE" "$ROOT/B"; cp -a "$TEMPLATE" "$ROOT/C"
+          cp "$WORKROOT/software/asia-baseline/gcclassic" "$ROOT/A/gcclassic"
+          cp "$WORKROOT/software/asia-instrumented/gcclassic" "$ROOT/B/gcclassic"
+          cp "$WORKROOT/software/asia-instrumented/gcclassic" "$ROOT/C/gcclassic"
+          chmod +x "$ROOT/A/gcclassic" "$ROOT/B/gcclassic" "$ROOT/C/gcclassic"
+          for x in A B C; do
+            rm -rf "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts" "$ROOT/$x/build"
+            rm -f "$ROOT/$x/CodeDir"
+            mkdir -p "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"
+          done
+          for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc; do cmp "$ROOT/A/$f" "$ROOT/B/$f"; cmp "$ROOT/B/$f" "$ROOT/C/$f"; done
+          python - <<'PY'
+          import yaml
+          from pathlib import Path
+          x=yaml.safe_load(Path('/tmp/gc14-global-asia-checkpoint/nested/A/geoschem_config.yml').read_text())
+          assert x['simulation']['read_restart_as_real8'] is False
+          assert x['grid']['longitude']['range'] == [60.0, 150.0]
+          assert x['grid']['latitude']['range'] == [-11.0, 55.0]
+          assert x['timesteps']['transport_timestep_in_s'] == 300
+          PY
+          # Hard lineage gate: SHA256(global produced BC) == SHA256(nested consumed BC)
+          test "$(sha256sum "${{ steps.bc.outputs.path }}" | awk '{print $1}')" = "${{ steps.bc.outputs.sha256 }}"
+
+      - name: Download official Asia NESTED inputs once
+        run: |
+          cd "$WORKROOT/nested/A"
+          ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/download_official_inputs.sh "$WORKROOT/nested/A" nested+aws
+
+      - name: Run and validate Asia NESTED A/B/C
+        run: |
+          set -euo pipefail
+          cd "$WORKROOT/nested/A"
+          env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          cd "$WORKROOT/nested/B"
+          env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          mkdir -p "$WORKROOT/nested/C/audit_raw"
+          cd "$WORKROOT/nested/C"
+          GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH="$WORKROOT/nested/C/audit_raw" ./gcclassic > GC.log 2>&1
+          cd "$GITHUB_WORKSPACE"
+          python scripts/pack_transport_audit.py "$WORKROOT/nested/C/audit_raw" "$WORKROOT/nested/C/transport_audit.nc4"
+          python scripts/validate_transport_audit.py "$WORKROOT/nested/C/transport_audit.nc4" --domain GEOSCHEM_NESTED_REGIONAL --expected-steps 12 --expected-dt 300 --json-out "$WORKROOT/nested/C/transport_audit_validation.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/A" "$WORKROOT/nested/B" --output "$WORKROOT/nested/A_vs_B.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/B" "$WORKROOT/nested/C" --output "$WORKROOT/nested/B_vs_C.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/A" "$WORKROOT/nested/C" --output "$WORKROOT/nested/A_vs_C.json"
+          for x in A B; do
+            find "$WORKROOT/nested/$x/OutputDir" "$WORKROOT/nested/$x/Restarts" -type f -print0 | sort -z | xargs -0 -r sha256sum > "$WORKROOT/nested/${x}_scientific_output_SHA256SUMS"
+          done
+          rm -rf "$WORKROOT/nested/C/audit_raw"
+          touch "$WORKROOT/nested/NESTED_VALIDATION_PASS"
+
+      - name: Build combined qualification record
+        run: |
+          set -euo pipefail
+          test -f "$WORKROOT/global/GLOBAL_VALIDATION_PASS"
+          test -f "$WORKROOT/nested/NESTED_VALIDATION_PASS"
+          mkdir -p "$WORKROOT/evidence"
+          BC_FILE="${{ steps.bc.outputs.path }}" BC_SHA="${{ steps.bc.outputs.sha256 }}" python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          r=Path('/tmp/gc14-global-asia-checkpoint')
+          load=lambda p: json.loads(Path(p).read_text())
+          checks={
+            'global_A_vs_B':load(r/'global/A_vs_B.json')['status'],
+            'global_B_vs_C':load(r/'global/B_vs_C.json')['status'],
+            'global_A_vs_C':load(r/'global/A_vs_C.json')['status'],
+            'global_audit':load(r/'global/C/transport_audit_validation.json')['status'],
+            'nested_A_vs_B':load(r/'nested/A_vs_B.json')['status'],
+            'nested_B_vs_C':load(r/'nested/B_vs_C.json')['status'],
+            'nested_A_vs_C':load(r/'nested/A_vs_C.json')['status'],
+            'nested_audit':load(r/'nested/C/transport_audit_validation.json')['status'],
+          }
+          bc=Path(os.environ['BC_FILE'])
+          bc_sha=hashlib.sha256(bc.read_bytes()).hexdigest()
+          ok=all(v=='PASS' for v in checks.values()) and bc_sha==os.environ['BC_SHA']
+          result={
+            'schema_id':'GC14_7_1_GLOBAL_ASIA_CHECKPOINT_QUALIFICATION_V1',
+            'status':'PASS' if ok else 'FAIL',
+            'global_case_id':'GCNOOP_GLOBAL_JJA_20190701_V1',
+            'nested_case_id':'GCNOOP_NESTED_AS_JJA_20190701_V1',
+            'global':{'domain':'GLOBAL_LATLON','expected_steps':6,'runtime_dt_s':600},
+            'nested':{'domain':'Asia','domain_code':'AS','expected_steps':12,'runtime_dt_s':300},
+            'bc_sha256':bc_sha,
+            'checks':checks,
+            'control_repo_sha':os.environ['GITHUB_SHA'],
+            'workflow_run_id':int(os.environ['GITHUB_RUN_ID']),
+            'scientific_thresholds_modified':False,
+          }
+          out=r/'evidence/QUALIFICATION.json'
+          out.write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
+          print(out.read_text())
+          if not ok: raise SystemExit('combined GLOBAL+Asia qualification failed')
+          PY
+
+      - name: Assemble reusable checkpoint
+        run: |
+          set -euo pipefail
+          CHECKPOINT="$WORKROOT/checkpoint"
+          rm -rf "$CHECKPOINT"; mkdir -p "$CHECKPOINT/software" "$CHECKPOINT/provenance"
+          cp -a "$WORKROOT/software/." "$CHECKPOINT/software/"
+          cp -a "$WORKROOT/asia-build-logs" "$CHECKPOINT/provenance/asia-build"
+          cp -a "$WORKROOT/evidence" "$CHECKPOINT/qualification"
+          cp config/global_asia_checkpoint_case.json "$CHECKPOINT/"
+          cp -a "$GITHUB_WORKSPACE" "$CHECKPOINT/control-repo"
+          mv "$WORKROOT/global" "$CHECKPOINT/global"
+          mv "$WORKROOT/nested" "$CHECKPOINT/nested"
+          mv "$WORKROOT/bc-producer" "$CHECKPOINT/bc-producer"
+          mv "$WORKROOT/ExtData" "$CHECKPOINT/ExtData"
+          # Canonical production results are the hook-enabled C runs; A/B are no-op qualification runs.
+          # Keep their logs/configs/hash manifests but remove duplicate heavy scientific arrays after exact equality is proven.
+          for d in "$CHECKPOINT/global/A" "$CHECKPOINT/global/B" "$CHECKPOINT/nested/A" "$CHECKPOINT/nested/B"; do
+            rm -rf "$d/OutputDir" "$d/Restarts"
+            mkdir -p "$d/OutputDir" "$d/Restarts"
+            printf 'QUALIFICATION_OUTPUTS_REMOVED_AFTER_EXACT_EQUALITY_PASS\n' > "$d/QUALIFICATION_OUTPUTS_REMOVED.txt"
+          done
+          test -d "$WORKROOT/checkpoint/ExtData"
+          test -d "$WORKROOT/checkpoint/global"
+          test -d "$WORKROOT/checkpoint/nested"
+          test -d "$WORKROOT/checkpoint/bc-producer"
+          test -d "$WORKROOT/checkpoint/software"
+          python - <<'PY'
+          import hashlib,json,os
+          from pathlib import Path
+          c=Path('/tmp/gc14-global-asia-checkpoint/checkpoint')
+          q=json.loads((c/'qualification/QUALIFICATION.json').read_text())
+          assert q['status']=='PASS'
+          executables={}
+          for name in ['global-baseline','global-instrumented','asia-baseline','asia-instrumented']:
+              p=c/'software'/name/'gcclassic'
+              executables[name]=hashlib.sha256(p.read_bytes()).hexdigest()
+          manifest={
+            'schema_id':'GC14_7_1_PAPER1_CHECKPOINT_IMAGE_V1',
+            'status':'PASS',
+            'workflow_run_id':int(os.environ['GITHUB_RUN_ID']),
+            'control_repo_sha':os.environ['GITHUB_SHA'],
+            'parent_image':'ghcr.io/s1475071992/gcclassic-reference@sha256:209a95291bdcf009390eb2a57d298a1fe1c354546a7b55408c252b89a9574518',
+            'global_case_id':'GCNOOP_GLOBAL_JJA_20190701_V1',
+            'nested_case_id':'GCNOOP_NESTED_AS_JJA_20190701_V1',
+            'nested_domain':'Asia',
+            'global_complete':True,
+            'bc_complete':True,
+            'nested_complete':True,
+            'qualification':'PASS',
+            'executables':executables,
+            'checkpoint_image_digest':'RECORDED_EXTERNALLY_AFTER_PUSH',
+          }
+          (c/'CHECKPOINT_MANIFEST.json').write_text(json.dumps(manifest,indent=2,sort_keys=True)+'\n')
+          PY
+          touch "$CHECKPOINT/CHECKPOINT_COMPLETE"
+          cat > "$CHECKPOINT/Dockerfile" <<'DOCKER'
+          FROM ghcr.io/s1475071992/gcclassic-reference@sha256:209a95291bdcf009390eb2a57d298a1fe1c354546a7b55408c252b89a9574518
+          COPY . /checkpoint/
+          RUN rm -rf /tmp/gc14-global-asia-checkpoint && ln -s /checkpoint /tmp/gc14-global-asia-checkpoint
+          ENV GC_DATA_ROOT=/checkpoint/ExtData
+          ENV GC_USER_REGISTERED=true
+          WORKDIR /checkpoint
+          LABEL org.torchctm.schema="GC14_7_1_PAPER1_CHECKPOINT_IMAGE_V1"
+          LABEL org.torchctm.global.status="PASS"
+          LABEL org.torchctm.nested.domain="Asia"
+          LABEL org.torchctm.nested.status="PASS"
+          LABEL org.torchctm.checkpoint.complete="true"
+          DOCKER
+          cd "$CHECKPOINT"
+          find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS
+          du -sh "$CHECKPOINT"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push checkpoint image
+        id: checkpoint_image
+        uses: docker/build-push-action@v6
+        with:
+          context: /tmp/gc14-global-asia-checkpoint/checkpoint
+          file: /tmp/gc14-global-asia-checkpoint/checkpoint/Dockerfile
+          push: true
+          tags: ghcr.io/s1475071992/gcclassic-paper1-checkpoint:14.7.1-global-asia-v1-run-${{ github.run_id }}
+          provenance: mode=max
+
+      - name: Verify published checkpoint image
+        env:
+          DIGEST: ${{ steps.checkpoint_image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          IMAGE="$CHECKPOINT_REPO@$DIGEST"
+          docker pull "$IMAGE"
+          docker run --rm --entrypoint /bin/bash "$IMAGE" -lc '
+            test -f /checkpoint/CHECKPOINT_COMPLETE
+            test -f /checkpoint/CHECKPOINT_MANIFEST.json
+            test -f /checkpoint/qualification/QUALIFICATION.json
+            test -d /checkpoint/ExtData
+            test -d /checkpoint/global/C/OutputDir
+            test -d /checkpoint/nested/C/OutputDir
+            test -f /checkpoint/bc-producer/BC_VALIDATION_PASS
+            test -x /checkpoint/software/global-instrumented/gcclassic
+            test -x /checkpoint/software/asia-instrumented/gcclassic
+            ! ldd /checkpoint/software/asia-instrumented/gcclassic | grep -q "not found"
+            python3 - <<"PY"
+          import json
+          from pathlib import Path
+          m=json.loads(Path("/checkpoint/CHECKPOINT_MANIFEST.json").read_text())
+          q=json.loads(Path("/checkpoint/qualification/QUALIFICATION.json").read_text())
+          assert m["status"] == "PASS"
+          assert q["status"] == "PASS"
+          assert m["nested_domain"] == "Asia"
+          PY
+          '
+          mkdir -p "$WORKROOT/published"
+          DIGEST="$DIGEST" TAG="$CHECKPOINT_REPO:$CHECKPOINT_TAG" python - <<'PY'
+          import json,os
+          from pathlib import Path
+          out={
+            'schema_id':'GC14_7_1_PAPER1_CHECKPOINT_IMAGE_PUBLICATION_V1',
+            'tag':os.environ['TAG'],
+            'digest':os.environ['DIGEST'],
+            'immutable_reference':os.environ['TAG'].split(':')[0]+'@'+os.environ['DIGEST'],
+            'workflow_run_id':int(os.environ['GITHUB_RUN_ID']),
+            'control_repo_sha':os.environ['GITHUB_SHA'],
+            'status':'PASS',
+          }
+          p=Path('/tmp/gc14-global-asia-checkpoint/published/PUBLISHED_IMAGE.json')
+          p.write_text(json.dumps(out,indent=2,sort_keys=True)+'\n')
+          print(p.read_text())
+          PY
+
+      - name: Upload publication evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-global-asia-checkpoint-${{ github.run_id }}
+          path: |
+            /tmp/gc14-global-asia-checkpoint/published/PUBLISHED_IMAGE.json
+            /tmp/gc14-global-asia-checkpoint/checkpoint/CHECKPOINT_MANIFEST.json
+            /tmp/gc14-global-asia-checkpoint/checkpoint/qualification/QUALIFICATION.json
+            /tmp/gc14-global-asia-checkpoint/checkpoint/SHA256SUMS
+          compression-level: 0
+          retention-days: 90
