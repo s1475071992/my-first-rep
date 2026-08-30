@@ -3,6 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATCHER = ROOT / 'scripts' / 'apply_transport_audit_patch.py'
 OUTPUT_CFG = ROOT / 'scripts' / 'configure_instantaneous_outputs.py'
+DOWNLOADER = ROOT / 'scripts' / 'download_official_inputs.sh'
 PACKER = ROOT / 'scripts' / 'pack_transport_audit.py'
 VALIDATOR = ROOT / 'scripts' / 'validate_transport_audit.py'
 
@@ -86,6 +87,22 @@ def test_instantaneous_state_file_duration_exceeds_sampling_frequency():
     assert 'SpeciesConc.duration:       {freq}' not in text
     assert 'StateMet.duration:          {freq}' not in text
     assert 'StateMetLevEdge.duration:    {freq}' not in text
+
+
+def test_downloaded_local_restart_is_shared_across_abc_runs():
+    """A/B/C must start from byte-identical local restart files."""
+    text = DOWNLOADER.read_text()
+    for token in [
+        'REFERENCE_INPUT_SIBLING_RESTART_SYNC=PASS',
+        'basename "$RUNDIR"',
+        '$PARENT/B',
+        '$PARENT/C',
+        'sha256sum',
+        'GEOSChem.Restart.',
+    ]:
+        assert token in text
+    assert '$PARENT/B/OutputDir' not in text
+    assert '$PARENT/C/OutputDir' not in text
 
 
 def test_packer_and_validator_are_part_of_formal_contract():
