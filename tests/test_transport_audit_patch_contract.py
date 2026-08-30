@@ -114,3 +114,15 @@ def test_packer_and_validator_are_part_of_formal_contract():
         assert token in pack
     for token in ['global_step_count', 'nested_step_count', 'runtime_dt', 'PASS']:
         assert token in val
+
+
+def test_raw_stream_byte_order_is_explicit_and_provenanced():
+    """Never infer raw Fortran stream endianness from the Python host."""
+    patch = PATCHER.read_text()
+    pack = PACKER.read_text()
+    assert 'source_byte_order=' in patch
+    assert 'source_byte_order' in pack
+    assert "'>f8'" in pack
+    assert "'>f4'" in pack
+    assert "'<f8'" in pack
+    assert "'<f4'" in pack
