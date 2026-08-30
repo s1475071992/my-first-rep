@@ -13,6 +13,40 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
+  benchmark-restart-probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe official 14.0.0 ten-year benchmark restart directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE_HTTP="http://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
+          BASE_HTTPS="https://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
+          mkdir -p probe
+          for base in "$BASE_HTTPS" "$BASE_HTTP"; do
+            echo "### DIRECTORY $base" | tee -a probe/restart_probe.txt
+            curl -fL --max-time 30 "$base/" 2>&1 | head -n 200 | tee -a probe/restart_probe.txt || true
+          done
+          for date in 20190101 20190401 20190701 20191001; do
+            for name in \
+              "GEOSChem.Restart.${date}_0000z.nc4" \
+              "GEOSChem.Restart.fullchem.${date}_0000z.nc4"; do
+              for base in "$BASE_HTTPS" "$BASE_HTTP"; do
+                url="$base/$name"
+                status=$(curl -L -sS -o /dev/null -w '%{http_code}' --max-time 30 "$url" || true)
+                printf '%s %s\n' "$status" "$url" | tee -a probe/restart_probe.txt
+              done
+            done
+          done
+
+      - name: Upload probe evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-benchmark-restart-probe-${{ github.run_id }}
+          path: probe/restart_probe.txt
+          retention-days: 14
+
   contract:
     runs-on: ubuntu-latest
     steps:
@@ -78,7 +112,7 @@ jobs:
           make install 2>&1 | tee "$WORKROOT/install.log"
           test -x "$RUNDIR/gcclassic"
 
-      - name: Execute one-hour dry run
+      - name: Execute dry run
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
           cd "$RUNDIR"
