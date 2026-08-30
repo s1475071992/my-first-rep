@@ -97,3 +97,17 @@ def test_reference_case_allows_missing_restart_species_with_background_default(t
     text = hemco.read_text()
     assert "SpeciesRst_?ALL? $YYYY/$MM/$DD/$HH CYS xyz 1 * - 1 1" in text
     assert "Met_DELPDRY $YYYY/$MM/$DD/$HH EY xyz 1 * - 1 1" in text
+
+
+def test_frozen_build_workflow_owns_compilation():
+    build_path = ROOT / ".github/workflows/gc14-build.yml"
+    package_path = ROOT / "scripts/package_frozen_gcclassic_build.sh"
+    assert build_path.is_file(), "missing dedicated GCClassic frozen-build workflow"
+    assert package_path.is_file(), "missing frozen-build packaging script"
+    text = build_path.read_text()
+    assert "name: gc14-frozen-build" in text
+    assert "bash scripts/bootstrap_gcclassic.sh" in text
+    assert "cmake ../CodeDir" in text
+    assert "make -j2" in text
+    assert "gc14-7-1-frozen-build-${{ github.run_id }}" in text
+    assert "actions/upload-artifact@v4" in text
