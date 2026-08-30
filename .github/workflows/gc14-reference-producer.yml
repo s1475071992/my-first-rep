@@ -65,7 +65,7 @@ jobs:
             --start 20190701T000000 \
             --end 20190701T010000
           python scripts/patch_history_for_window.py "$RUNDIR/HISTORY.rc" --seconds 3600
-          grep -E '^SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
+          grep -E '^[[:space:]]*SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
 
       - name: Configure GCClassic
         run: |
