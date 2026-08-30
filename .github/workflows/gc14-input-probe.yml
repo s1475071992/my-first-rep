@@ -1,62 +1,29 @@
 name: gc14-input-probe
 
 on:
+  push:
+    branches:
+      - gc14-7-1-reference-producer-v1
+    paths:
+      - .github/workflows/gc14-input-probe.yml
+      - tests/test_nested_input_probe_contract.py
+      - config/nested_noop_case.json
+      - scripts/create_nested_noop_rundir.sh
+      - scripts/audit_nested_dryrun.py
   workflow_dispatch:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
-  benchmark-restart-probe:
+  contract:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
     steps:
-      - name: Probe official restart archives and S3 mirrors
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p probe
-          OUT=probe/restart_probe.txt
-
-          echo '### HARVARD ARCHIVE DNS/HTTP PROBE' | tee -a "$OUT"
-          for base in \
-            "https://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts" \
-            "http://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"; do
-            echo "### DIRECTORY $base" | tee -a "$OUT"
-            curl -fL --max-time 20 "$base/" 2>&1 | head -n 80 | tee -a "$OUT" || true
-          done
-
-          echo '### OFFICIAL S3 LIST PROBES' | tee -a "$OUT"
-          for endpoint in \
-            "https://geos-chem.s3-us-west-2.amazonaws.com" \
-            "https://gcgrid.s3.amazonaws.com"; do
-            for prefix in \
-              "10yr_benchmarks/14.0.0/GCClassic/restarts/" \
-              "geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts/" \
-              "ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/"; do
-              echo "### S3 $endpoint prefix=$prefix" | tee -a "$OUT"
-              curl -fsSL --max-time 30 \
-                "$endpoint/?list-type=2&max-keys=200&prefix=$prefix" \
-                | tr '>' '>\n' \
-                | grep -E '<Key>|<Size>|<KeyCount>|<IsTruncated>' \
-                | head -n 250 \
-                | tee -a "$OUT" || true
-            done
-          done
-
-          echo '### CURRENT OFFICIAL SAMPLE/FULLCHEM HEAD PROBES' | tee -a "$OUT"
-          for url in \
-            "https://geos-chem.s3-us-west-2.amazonaws.com/ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/GEOSChem.Restart.TransportTracers.20190101_0000z.nc4" \
-            "https://geos-chem.s3-us-west-2.amazonaws.com/ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/GEOSChem.Restart.fullchem.20190701_0000z.nc4"; do
-            echo "URL $url" | tee -a "$OUT"
-            curl -ILsS --max-time 30 "$url" \
-              | grep -Ei 'HTTP/|content-length:|last-modified:|etag:' \
-              | tee -a "$OUT" || true
-          done
-
-      - name: Upload probe evidence
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          name: gc14-benchmark-restart-probe-${{ github.run_id }}
-          path: probe/restart_probe.txt
-          retention-days: 14
+          python-version: "3.11"
+      - run: python -m pip install --upgrade pytest
+      - name: Nested input-probe contract
+        run: python -m pytest -q tests/test_nested_input_probe_contract.py
