@@ -80,3 +80,20 @@ def test_one_hour_case_reduces_history_to_transport_audit_collections(tmp_path):
     assert "SpeciesConc.frequency: 00000000 010000" in text
     assert "SpeciesConc.duration:  00000000 010000" in text
     assert "StateMet.frequency:    00000001 000000" in text
+
+
+def test_reference_case_allows_missing_restart_species_with_background_default(tmp_path):
+    module = load_script(ROOT / "scripts/configure_reference_case.py", "configure_reference_case")
+    hemco = tmp_path / "HEMCO_Config.rc"
+    hemco.write_text(
+        "(((GC_RESTART\n"
+        "* SPC_ ./Restarts/GEOSChem.Restart.$YYYY$MM$DD_$HH$MNz.nc4 "
+        "SpeciesRst_?ALL? $YYYY/$MM/$DD/$HH EFYO xyz 1 * - 1 1\n"
+        "* DELPDRY ./Restarts/GEOSChem.Restart.$YYYY$MM$DD_$HH$MNz.nc4 "
+        "Met_DELPDRY $YYYY/$MM/$DD/$HH EY xyz 1 * - 1 1\n"
+        ")))GC_RESTART\n"
+    )
+    module.patch_hemco_restart_policy(hemco)
+    text = hemco.read_text()
+    assert "SpeciesRst_?ALL? $YYYY/$MM/$DD/$HH CYS xyz 1 * - 1 1" in text
+    assert "Met_DELPDRY $YYYY/$MM/$DD/$HH EY xyz 1 * - 1 1" in text
