@@ -8,8 +8,11 @@ on:
       - .github/workflows/gc14-input-probe.yml
       - tests/test_nested_input_probe_contract.py
       - config/nested_noop_case.json
+      - config/transporttracers_bc_producer.json
       - scripts/create_nested_noop_rundir.sh
       - scripts/audit_nested_dryrun.py
+      - scripts/patch_boundary_conditions_history.py
+      - scripts/configure_nested_boundary_conditions.py
   workflow_dispatch:
 
 permissions:
@@ -31,10 +34,10 @@ jobs:
       - name: Nested input-probe contract
         run: python -m pytest -q tests/test_nested_input_probe_contract.py
 
-  nested-dryrun-probe:
+  bc-production-and-nested-probe:
     needs: contract
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 90
     steps:
       - name: Checkout control repository
         uses: actions/checkout@v4
@@ -44,11 +47,12 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dry-run runtime dependencies
+      - name: Install runtime dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libnetcdf-dev libnetcdff-dev netcdf-bin
           python -m pip install --upgrade pyyaml
+          command -v aws
 
       - name: Read frozen GCClassic build pin
         id: frozen
@@ -73,7 +77,7 @@ jobs:
       - name: Restore and verify frozen build
         run: |
           set -euo pipefail
-          rm -rf "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+          rm -rf "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/rundirs" "$WORKROOT/global-bc-rundir"
           mkdir -p "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
           DL="$WORKROOT/frozen-download"
           BUNDLE="${{ steps.frozen.outputs.bundle_filename }}"
@@ -83,10 +87,111 @@ jobs:
           test -x "$EXE"
           actual=$(sha256sum "$EXE" | awk '{print $1}')
           test "$actual" = "${{ steps.frozen.outputs.executable_sha256 }}"
-          test -x "$WORKROOT/frozen/GCClassic/src/GEOS-Chem/run/GCClassic/createRunDir.sh"
+          mkdir -p "$HOME/.geoschem"
+          cat > "$HOME/.geoschem/config" <<EOF
+          export GC_DATA_ROOT=$WORKROOT/ExtData
+          export GC_USER_REGISTERED=true
+          EOF
+          echo "GC_DATA_ROOT=$WORKROOT/ExtData" >> "$GITHUB_ENV"
+          echo "GC_USER_REGISTERED=true" >> "$GITHUB_ENV"
 
-      - name: Create official Europe nested TransportTracers run directory
-        id: rundir
+      - name: Prepare canonical global TransportTracers BC producer
+        id: global
+        run: |
+          set -euo pipefail
+          GLOBAL="$WORKROOT/global-bc-rundir"
+          cp -a "$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers" "$GLOBAL"
+          rm -rf "$GLOBAL/OutputDir" "$GLOBAL/Restarts"
+          mkdir -p "$GLOBAL/OutputDir" "$GLOBAL/Restarts"
+          python scripts/configure_reference_case.py \
+            --rundir "$GLOBAL" \
+            --case-id GCBC_GLOBAL_JJA_20190701_V1 \
+            --start 20190701T000000 \
+            --end 20190701T030000
+          python scripts/patch_boundary_conditions_history.py "$GLOBAL/HISTORY.rc"
+          python - <<'PY'
+          import json, pathlib, yaml
+          cfg = yaml.safe_load(pathlib.Path('/tmp/gc14-nested-input-probe/global-bc-rundir/geoschem_config.yml').read_text())
+          bc = json.loads(pathlib.Path('config/transporttracers_bc_producer.json').read_text())
+          assert cfg['simulation']['name'] == 'TransportTracers'
+          assert str(cfg['simulation']['met_field']).upper() == 'MERRA2'
+          assert str(cfg['grid']['resolution']) == '4x5'
+          assert cfg['grid']['number_of_levels'] == 72
+          assert cfg['timesteps']['transport_timestep_in_s'] == bc['transport_timestep_seconds'] == 600
+          history = pathlib.Path('/tmp/gc14-nested-input-probe/global-bc-rundir/HISTORY.rc').read_text()
+          head = history.split('::', 1)[0]
+          assert "'Restart'" in head and "'BoundaryConditions'" in head
+          assert "'SpeciesConc'" not in head
+          assert 'BoundaryConditions.frequency:  00000000 030000' in history
+          assert "BoundaryConditions.mode:       'instantaneous'" in history
+          assert 'SpeciesBC_?ADV?' in history
+          PY
+          echo "path=$GLOBAL" >> "$GITHUB_OUTPUT"
+
+      - name: Dry-run global BC producer and download only declared official inputs
+        run: |
+          set -euo pipefail
+          GLOBAL="${{ steps.global.outputs.path }}"
+          cd "$GLOBAL"
+          ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"
+          python scripts/validate_dryrun.py "$GLOBAL/log.dryrun" --output "$GLOBAL/dryrun_summary.json"
+          cd "$GLOBAL"
+          ./download_data.py log.dryrun geoschem+aws -skip-download > download_data_skip.log 2>&1
+          cd "$GITHUB_WORKSPACE"
+          bash scripts/download_official_inputs.sh "$GLOBAL" geoschem+aws
+
+      - name: Run canonical global producer to create BoundaryConditions
+        id: bc
+        run: |
+          set -euo pipefail
+          GLOBAL="${{ steps.global.outputs.path }}"
+          cd "$GLOBAL"
+          ./gcclassic > BC_GC.log 2>&1
+          python - <<'PY'
+          from pathlib import Path
+          text = Path('BC_GC.log').read_text(errors='replace')
+          norm = [''.join(x.split()).upper() for x in text.splitlines()]
+          assert any('ENDOFGEOS--CHEM' in x for x in norm), 'global BC producer did not complete'
+          PY
+          mapfile -t files < <(find OutputDir -maxdepth 1 -type f -name 'GEOSChem.BoundaryConditions.*.nc4' | sort)
+          test "${#files[@]}" -ge 1
+          BC_FILE="${files[0]}"
+          test -s "$BC_FILE"
+          ncdump -h "$BC_FILE" > BC_header.txt
+          ncdump -v time "$BC_FILE" > BC_time.txt
+          grep -q 'SpeciesBC_PassiveTracer' BC_header.txt
+          python - "$BC_FILE" BC_header.txt <<'PY'
+          import hashlib, json, pathlib, re, sys
+          bc = pathlib.Path(sys.argv[1]).resolve()
+          header = pathlib.Path(sys.argv[2]).read_text()
+          m = re.search(r'time\s*=\s*UNLIMITED\s*;\s*//\s*\((\d+) currently\)', header)
+          if not m:
+              raise SystemExit('could not determine BC time record count')
+          n = int(m.group(1))
+          if n < 2:
+              raise SystemExit(f'expected at least 2 BC time records (00 and 03 UTC), found {n}')
+          h = hashlib.sha256(bc.read_bytes()).hexdigest()
+          out = {
+              'producer_id': 'GC14_7_1_TRANSPORTTRACERS_BC_PRODUCER_V1',
+              'status': 'PASS',
+              'boundary_file': str(bc),
+              'boundary_file_sha256': h,
+              'boundary_file_size_bytes': bc.stat().st_size,
+              'time_record_count': n,
+              'contains_SpeciesBC_PassiveTracer': True,
+              'frequency_seconds': 10800,
+              'mode': 'instantaneous',
+              'source_executable_sha256': '${{ steps.frozen.outputs.executable_sha256 }}',
+              'scientific_thresholds_modified': False,
+          }
+          pathlib.Path('bc_producer_manifest.json').write_text(json.dumps(out, indent=2, sort_keys=True) + '\n')
+          PY
+          echo "path=$(realpath "$BC_FILE")" >> "$GITHUB_OUTPUT"
+          echo "sha256=$(sha256sum "$BC_FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Create official Europe nested run directory
+        id: nested
         run: |
           set -euo pipefail
           RUNDIR=$(bash scripts/create_nested_noop_rundir.sh \
@@ -98,19 +203,22 @@ jobs:
           chmod +x "$RUNDIR/gcclassic"
           actual=$(sha256sum "$RUNDIR/gcclassic" | awk '{print $1}')
           test "$actual" = "${{ steps.frozen.outputs.executable_sha256 }}"
+          python scripts/configure_nested_boundary_conditions.py \
+            --hemco "$RUNDIR/HEMCO_Config.rc" \
+            --boundary-file "${{ steps.bc.outputs.path }}"
+          grep -q -- '--> GC_BCs' "$RUNDIR/HEMCO_Config.rc"
+          grep -q 'SpeciesBC_?ADV?' "$RUNDIR/HEMCO_Config.rc"
+          grep -q 'GC_BCs' "$RUNDIR/HEMCO_Config.rc"
           echo "path=$RUNDIR" >> "$GITHUB_OUTPUT"
 
-      - name: Run GCClassic dry-run only
+      - name: Run nested GCClassic dry-run with generated BC
         run: |
           set -euo pipefail
-          cd "${{ steps.rundir.outputs.path }}"
+          RUNDIR="${{ steps.nested.outputs.path }}"
+          cd "$RUNDIR"
           ./gcclassic --dryrun > log.dryrun 2>&1
           test -s log.dryrun
-
-      - name: Build official unique input manifest without downloading
-        run: |
-          set -euo pipefail
-          RUNDIR="${{ steps.rundir.outputs.path }}"
+          cd "$GITHUB_WORKSPACE"
           python scripts/validate_dryrun.py "$RUNDIR/log.dryrun" --output "$RUNDIR/dryrun_summary.json"
           cd "$RUNDIR"
           ./download_data.py log.dryrun nested+aws -skip-download > download_data_skip.log 2>&1
@@ -121,7 +229,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          RUNDIR="${{ steps.rundir.outputs.path }}"
+          RUNDIR="${{ steps.nested.outputs.path }}"
           python scripts/audit_nested_dryrun.py \
             --rundir "$RUNDIR" \
             --case config/nested_noop_case.json \
@@ -133,76 +241,132 @@ jobs:
           echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
           exit 0
 
-      - name: Hash all small control evidence
+      - name: Build qualification result and hashes
         if: always()
         run: |
           set -euo pipefail
-          RUNDIR="${{ steps.rundir.outputs.path }}"
-          test -d "$RUNDIR"
+          GLOBAL="${{ steps.global.outputs.path }}"
+          RUNDIR="${{ steps.nested.outputs.path }}"
+          python - <<'PY'
+          import json, pathlib
+          root = pathlib.Path('/tmp/gc14-nested-input-probe')
+          nested = root / 'rundirs/gc_05x0625_EU_merra2_TransportTracers/nested_input_probe.json'
+          bc = root / 'global-bc-rundir/bc_producer_manifest.json'
+          result = {
+              'schema_id': 'GC14_7_1_NESTED_BC_INPUT_QUALIFICATION_V1',
+              'bc_producer': json.loads(bc.read_text()) if bc.exists() else None,
+              'nested_probe': json.loads(nested.read_text()) if nested.exists() else None,
+          }
+          ok = bool(result['bc_producer'] and result['bc_producer']['status'] == 'PASS' and
+                    result['nested_probe'] and result['nested_probe']['status'] == 'PASS')
+          result['status'] = 'PASS' if ok else 'FAIL'
+          (root / 'qualification_result.json').write_text(json.dumps(result, indent=2, sort_keys=True) + '\n')
+          PY
           {
             sha256sum config/nested_noop_case.json
+            sha256sum config/transporttracers_bc_producer.json
             sha256sum scripts/create_nested_noop_rundir.sh
             sha256sum scripts/audit_nested_dryrun.py
+            sha256sum scripts/patch_boundary_conditions_history.py
+            sha256sum scripts/configure_nested_boundary_conditions.py
             sha256sum .github/workflows/gc14-input-probe.yml
             for f in \
-              createRunDir.log \
-              download_data.yml \
-              log.dryrun \
-              log.dryrun.unique \
-              download_data_skip.log \
-              dryrun_summary.json \
-              geoschem_config.yml \
-              HEMCO_Config.rc \
-              HISTORY.rc \
-              species_database.yml \
-              REFERENCE_CASE.json \
-              NESTED_NOOP_CASE.txt \
-              nested_input_probe.json \
-              nested_input_urls.tsv; do
-              if [[ -f "$RUNDIR/$f" ]]; then sha256sum "$RUNDIR/$f"; fi
+              "$GLOBAL/REFERENCE_CASE.json" \
+              "$GLOBAL/geoschem_config.yml" \
+              "$GLOBAL/HEMCO_Config.rc" \
+              "$GLOBAL/HISTORY.rc" \
+              "$GLOBAL/log.dryrun" \
+              "$GLOBAL/log.dryrun.after_download" \
+              "$GLOBAL/download_data_skip.log" \
+              "$GLOBAL/download_official_inputs.log" \
+              "$GLOBAL/BC_GC.log" \
+              "$GLOBAL/BC_header.txt" \
+              "$GLOBAL/BC_time.txt" \
+              "$GLOBAL/bc_producer_manifest.json" \
+              "$RUNDIR/createRunDir.log" \
+              "$RUNDIR/download_data.yml" \
+              "$RUNDIR/log.dryrun" \
+              "$RUNDIR/log.dryrun.unique" \
+              "$RUNDIR/download_data_skip.log" \
+              "$RUNDIR/dryrun_summary.json" \
+              "$RUNDIR/geoschem_config.yml" \
+              "$RUNDIR/HEMCO_Config.rc" \
+              "$RUNDIR/HISTORY.rc" \
+              "$RUNDIR/species_database.yml" \
+              "$RUNDIR/REFERENCE_CASE.json" \
+              "$RUNDIR/NESTED_NOOP_CASE.txt" \
+              "$RUNDIR/nested_input_probe.json" \
+              "$RUNDIR/nested_input_urls.tsv" \
+              "$WORKROOT/qualification_result.json"; do
+              if [[ -f "$f" ]]; then sha256sum "$f"; fi
             done
-          } > "$RUNDIR/control_sha256.txt"
+            sha256sum "${{ steps.bc.outputs.path }}"
+          } > "$WORKROOT/control_sha256.txt"
 
-      - name: Upload nested dry-run evidence
+      - name: Upload BC and nested input qualification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gc14-nested-eu-input-probe-${{ github.run_id }}
+          name: gc14-transporttracers-bc-nested-eu-${{ github.run_id }}
           path: |
             config/nested_noop_case.json
-            ${{ steps.rundir.outputs.path }}/createRunDir.log
-            ${{ steps.rundir.outputs.path }}/download_data.yml
-            ${{ steps.rundir.outputs.path }}/log.dryrun
-            ${{ steps.rundir.outputs.path }}/log.dryrun.unique
-            ${{ steps.rundir.outputs.path }}/download_data_skip.log
-            ${{ steps.rundir.outputs.path }}/dryrun_summary.json
-            ${{ steps.rundir.outputs.path }}/geoschem_config.yml
-            ${{ steps.rundir.outputs.path }}/HEMCO_Config.rc
-            ${{ steps.rundir.outputs.path }}/HISTORY.rc
-            ${{ steps.rundir.outputs.path }}/species_database.yml
-            ${{ steps.rundir.outputs.path }}/REFERENCE_CASE.json
-            ${{ steps.rundir.outputs.path }}/NESTED_NOOP_CASE.txt
-            ${{ steps.rundir.outputs.path }}/nested_input_probe.json
-            ${{ steps.rundir.outputs.path }}/nested_input_urls.tsv
-            ${{ steps.rundir.outputs.path }}/control_sha256.txt
+            config/transporttracers_bc_producer.json
+            ${{ steps.global.outputs.path }}/REFERENCE_CASE.json
+            ${{ steps.global.outputs.path }}/geoschem_config.yml
+            ${{ steps.global.outputs.path }}/HEMCO_Config.rc
+            ${{ steps.global.outputs.path }}/HISTORY.rc
+            ${{ steps.global.outputs.path }}/log.dryrun
+            ${{ steps.global.outputs.path }}/log.dryrun.after_download
+            ${{ steps.global.outputs.path }}/download_data_skip.log
+            ${{ steps.global.outputs.path }}/download_official_inputs.log
+            ${{ steps.global.outputs.path }}/BC_GC.log
+            ${{ steps.global.outputs.path }}/BC_header.txt
+            ${{ steps.global.outputs.path }}/BC_time.txt
+            ${{ steps.global.outputs.path }}/bc_producer_manifest.json
+            ${{ steps.bc.outputs.path }}
+            ${{ steps.nested.outputs.path }}/createRunDir.log
+            ${{ steps.nested.outputs.path }}/download_data.yml
+            ${{ steps.nested.outputs.path }}/log.dryrun
+            ${{ steps.nested.outputs.path }}/log.dryrun.unique
+            ${{ steps.nested.outputs.path }}/download_data_skip.log
+            ${{ steps.nested.outputs.path }}/dryrun_summary.json
+            ${{ steps.nested.outputs.path }}/geoschem_config.yml
+            ${{ steps.nested.outputs.path }}/HEMCO_Config.rc
+            ${{ steps.nested.outputs.path }}/HISTORY.rc
+            ${{ steps.nested.outputs.path }}/species_database.yml
+            ${{ steps.nested.outputs.path }}/REFERENCE_CASE.json
+            ${{ steps.nested.outputs.path }}/NESTED_NOOP_CASE.txt
+            ${{ steps.nested.outputs.path }}/nested_input_probe.json
+            ${{ steps.nested.outputs.path }}/nested_input_urls.tsv
+            ${{ env.WORKROOT }}/qualification_result.json
+            ${{ env.WORKROOT }}/control_sha256.txt
           if-no-files-found: warn
-          retention-days: 30
+          retention-days: 90
 
-      - name: Enforce probe result
+      - name: Enforce complete nested input qualification
         run: |
-          RUNDIR="${{ steps.rundir.outputs.path }}"
-          cat "$RUNDIR/nested_input_probe.json"
+          set -euo pipefail
           test "${{ steps.audit.outputs.exit_code }}" = "0"
+          cat "$WORKROOT/qualification_result.json"
           python - <<'PY'
           import json
           from pathlib import Path
-          p = Path(r'''${{ steps.rundir.outputs.path }}/nested_input_probe.json''')
-          x = json.loads(p.read_text())
-          assert x['status'] == 'PASS'
-          assert x['DRYRUN']['status'] == 'PASS'
-          assert x['MET']['status'] == 'RESOLVABLE'
-          assert x['RESTART']['status'] == 'RESOLVABLE'
-          assert x['BC']['status'] == 'RESOLVABLE'
-          assert x['scientific_data_downloaded'] is False
-          assert x['scientific_thresholds_modified'] is False
+          q = json.loads(Path('/tmp/gc14-nested-input-probe/qualification_result.json').read_text())
+          assert q['status'] == 'PASS'
+          bc = q['bc_producer']
+          nested = q['nested_probe']
+          assert bc['status'] == 'PASS'
+          assert bc['contains_SpeciesBC_PassiveTracer'] is True
+          assert bc['time_record_count'] >= 2
+          assert nested['status'] == 'PASS'
+          assert nested['DRYRUN']['status'] == 'PASS'
+          assert nested['MET']['status'] == 'RESOLVABLE'
+          assert nested['RESTART']['status'] == 'RESOLVABLE'
+          assert nested['BC']['status'] == 'RESOLVABLE'
+          assert nested['BC']['reference_count'] >= 1
+          assert nested['nested_scientific_data_downloaded'] is False
+          assert nested['scientific_thresholds_modified'] is False
+          bc_records = [r for r in nested['paths_and_urls'] if r['family'] == 'BC']
+          assert bc_records
+          assert all(r['resolution_mode'] == 'LOCAL_GENERATED_FILE' for r in bc_records)
           PY
