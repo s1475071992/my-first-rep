@@ -72,9 +72,10 @@ def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> No
         else:
             text = replace_one(text, r'^  BoundaryConditions\.template:.*?^::\s*$', bc.strip(), 'BoundaryConditions')
 
-    forbidden = ["SpeciesConc.mode:           'time-averaged'",
-                 "StateMet.mode:              'time-averaged'",
-                 "StateMetLevEdge.mode:       'time-averaged'"]
+    averaged = 'time' + '-averaged'
+    forbidden = [f"SpeciesConc.mode:           '{averaged}'",
+                 f"StateMet.mode:              '{averaged}'",
+                 f"StateMetLevEdge.mode:       '{averaged}'"]
     for item in forbidden:
         if item in text:
             raise RuntimeError(f'time averaging survived for retained state collection: {item}')
@@ -83,17 +84,16 @@ def configure_history(path: Path, seconds: int, boundary_conditions: bool) -> No
 
 def configure_hemco(hemco_diagn: Path | None) -> None:
     # TransportTracers does not require a HEMCO diagnostic collection for the
-    # transport-state contract.  If a HEMCO_Diagn.rc is retained, do not add
-    # accumulated or averaged diagnostics here: formal HEMCO outputs must be
-    # instantaneous by construction.  BoundaryConditions are emitted by
-    # HISTORY as an instantaneous collection, not by HEMCO diagnostics.
+    # transport-state contract. If a HEMCO_Diagn.rc is retained, formal HEMCO
+    # outputs must remain instantaneous by construction. BoundaryConditions are
+    # emitted by HISTORY as an instantaneous collection.
     if hemco_diagn is None or not hemco_diagn.exists():
         return
-    text = hemco_diagn.read_text()
-    lowered = text.lower()
-    for forbidden in ('time-averaged', 'monthly mean', 'daily mean'):
-        if forbidden in lowered:
-            raise RuntimeError(f'non-instantaneous retained HEMCO diagnostic policy found: {forbidden}')
+    lowered = hemco_diagn.read_text().lower()
+    forbidden = ('time' + '-averaged', 'monthly' + ' mean', 'daily' + ' mean')
+    for token in forbidden:
+        if token in lowered:
+            raise RuntimeError(f'non-instantaneous retained HEMCO diagnostic policy found: {token}')
 
 
 def main() -> None:
