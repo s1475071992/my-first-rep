@@ -16,6 +16,9 @@ permissions:
   contents: read
   actions: read
 
+env:
+  WORKROOT: /tmp/gc14-nested-input-probe
+
 jobs:
   contract:
     runs-on: ubuntu-latest
@@ -27,3 +30,179 @@ jobs:
       - run: python -m pip install --upgrade pytest
       - name: Nested input-probe contract
         run: python -m pytest -q tests/test_nested_input_probe_contract.py
+
+  nested-dryrun-probe:
+    needs: contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout control repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dry-run runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnetcdf-dev libnetcdff-dev netcdf-bin
+          python -m pip install --upgrade pyyaml
+
+      - name: Read frozen GCClassic build pin
+        id: frozen
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          for key in ['build_run_id','artifact_name','bundle_filename','bundle_sha256','executable_sha256','gcclassic_sha','geoschem_sha']:
+              print(f"{key}={pin[key]}")
+          PY
+
+      - name: Download exact frozen GCClassic build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.frozen.outputs.artifact_name }}
+          path: ${{ env.WORKROOT }}/frozen-download
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.frozen.outputs.build_run_id }}
+
+      - name: Restore and verify frozen build
+        run: |
+          set -euo pipefail
+          rm -rf "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+          mkdir -p "$WORKROOT/frozen" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+          DL="$WORKROOT/frozen-download"
+          BUNDLE="${{ steps.frozen.outputs.bundle_filename }}"
+          echo "${{ steps.frozen.outputs.bundle_sha256 }}  $DL/$BUNDLE" | sha256sum -c -
+          tar -xzf "$DL/$BUNDLE" -C "$WORKROOT/frozen"
+          EXE="$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers/gcclassic"
+          test -x "$EXE"
+          actual=$(sha256sum "$EXE" | awk '{print $1}')
+          test "$actual" = "${{ steps.frozen.outputs.executable_sha256 }}"
+          test -x "$WORKROOT/frozen/GCClassic/src/GEOS-Chem/run/GCClassic/createRunDir.sh"
+
+      - name: Create official Europe nested TransportTracers run directory
+        id: rundir
+        run: |
+          set -euo pipefail
+          RUNDIR=$(bash scripts/create_nested_noop_rundir.sh \
+            "$WORKROOT/frozen/GCClassic" \
+            "$WORKROOT/ExtData" \
+            "$WORKROOT/rundirs" | tail -n 1)
+          test -d "$RUNDIR"
+          cp "$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers/gcclassic" "$RUNDIR/gcclassic"
+          chmod +x "$RUNDIR/gcclassic"
+          actual=$(sha256sum "$RUNDIR/gcclassic" | awk '{print $1}')
+          test "$actual" = "${{ steps.frozen.outputs.executable_sha256 }}"
+          echo "path=$RUNDIR" >> "$GITHUB_OUTPUT"
+
+      - name: Run GCClassic dry-run only
+        run: |
+          set -euo pipefail
+          cd "${{ steps.rundir.outputs.path }}"
+          ./gcclassic --dryrun > log.dryrun 2>&1
+          test -s log.dryrun
+
+      - name: Build official unique input manifest without downloading
+        run: |
+          set -euo pipefail
+          RUNDIR="${{ steps.rundir.outputs.path }}"
+          python scripts/validate_dryrun.py "$RUNDIR/log.dryrun" --output "$RUNDIR/dryrun_summary.json"
+          cd "$RUNDIR"
+          ./download_data.py log.dryrun nested+aws -skip-download > download_data_skip.log 2>&1
+          test -s log.dryrun.unique
+
+      - name: Audit MET restart BC resolvability
+        id: audit
+        shell: bash
+        run: |
+          set +e
+          RUNDIR="${{ steps.rundir.outputs.path }}"
+          python scripts/audit_nested_dryrun.py \
+            --rundir "$RUNDIR" \
+            --case config/nested_noop_case.json \
+            --unique-log "$RUNDIR/log.dryrun.unique" \
+            --portal-base https://gcgrid.s3.amazonaws.com \
+            --output "$RUNDIR/nested_input_probe.json" \
+            --urls-output "$RUNDIR/nested_input_urls.tsv"
+          rc=$?
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Hash all small control evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          RUNDIR="${{ steps.rundir.outputs.path }}"
+          test -d "$RUNDIR"
+          {
+            sha256sum config/nested_noop_case.json
+            sha256sum scripts/create_nested_noop_rundir.sh
+            sha256sum scripts/audit_nested_dryrun.py
+            sha256sum .github/workflows/gc14-input-probe.yml
+            for f in \
+              createRunDir.log \
+              download_data.yml \
+              log.dryrun \
+              log.dryrun.unique \
+              download_data_skip.log \
+              dryrun_summary.json \
+              geoschem_config.yml \
+              HEMCO_Config.rc \
+              HISTORY.rc \
+              species_database.yml \
+              REFERENCE_CASE.json \
+              NESTED_NOOP_CASE.txt \
+              nested_input_probe.json \
+              nested_input_urls.tsv; do
+              if [[ -f "$RUNDIR/$f" ]]; then sha256sum "$RUNDIR/$f"; fi
+            done
+          } > "$RUNDIR/control_sha256.txt"
+
+      - name: Upload nested dry-run evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-nested-eu-input-probe-${{ github.run_id }}
+          path: |
+            config/nested_noop_case.json
+            ${{ steps.rundir.outputs.path }}/createRunDir.log
+            ${{ steps.rundir.outputs.path }}/download_data.yml
+            ${{ steps.rundir.outputs.path }}/log.dryrun
+            ${{ steps.rundir.outputs.path }}/log.dryrun.unique
+            ${{ steps.rundir.outputs.path }}/download_data_skip.log
+            ${{ steps.rundir.outputs.path }}/dryrun_summary.json
+            ${{ steps.rundir.outputs.path }}/geoschem_config.yml
+            ${{ steps.rundir.outputs.path }}/HEMCO_Config.rc
+            ${{ steps.rundir.outputs.path }}/HISTORY.rc
+            ${{ steps.rundir.outputs.path }}/species_database.yml
+            ${{ steps.rundir.outputs.path }}/REFERENCE_CASE.json
+            ${{ steps.rundir.outputs.path }}/NESTED_NOOP_CASE.txt
+            ${{ steps.rundir.outputs.path }}/nested_input_probe.json
+            ${{ steps.rundir.outputs.path }}/nested_input_urls.tsv
+            ${{ steps.rundir.outputs.path }}/control_sha256.txt
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Enforce probe result
+        run: |
+          RUNDIR="${{ steps.rundir.outputs.path }}"
+          cat "$RUNDIR/nested_input_probe.json"
+          test "${{ steps.audit.outputs.exit_code }}" = "0"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path(r'''${{ steps.rundir.outputs.path }}/nested_input_probe.json''')
+          x = json.loads(p.read_text())
+          assert x['status'] == 'PASS'
+          assert x['DRYRUN']['status'] == 'PASS'
+          assert x['MET']['status'] == 'RESOLVABLE'
+          assert x['RESTART']['status'] == 'RESOLVABLE'
+          assert x['BC']['status'] == 'RESOLVABLE'
+          assert x['scientific_data_downloaded'] is False
+          assert x['scientific_thresholds_modified'] is False
+          PY
