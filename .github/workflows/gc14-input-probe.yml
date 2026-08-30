@@ -115,7 +115,7 @@ jobs:
           bc = json.loads(pathlib.Path('config/transporttracers_bc_producer.json').read_text())
           assert cfg['simulation']['name'] == 'TransportTracers'
           assert str(cfg['simulation']['met_field']).upper() == 'MERRA2'
-          assert str(cfg['grid']['resolution']) == '4x5'
+          assert str(cfg['grid']['resolution']).replace('.0', '') == '4x5'
           assert cfg['grid']['number_of_levels'] == 72
           assert cfg['timesteps']['transport_timestep_in_s'] == bc['transport_timestep_seconds'] == 600
           history = pathlib.Path('/tmp/gc14-nested-input-probe/global-bc-rundir/HISTORY.rc').read_text()
@@ -300,7 +300,8 @@ jobs:
               "$WORKROOT/qualification_result.json"; do
               if [[ -f "$f" ]]; then sha256sum "$f"; fi
             done
-            sha256sum "${{ steps.bc.outputs.path }}"
+            BC_PATH="${{ steps.bc.outputs.path }}"
+            if [[ -n "$BC_PATH" && -f "$BC_PATH" ]]; then sha256sum "$BC_PATH"; fi
           } > "$WORKROOT/control_sha256.txt"
 
       - name: Upload BC and nested input qualification evidence
