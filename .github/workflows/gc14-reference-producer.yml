@@ -1,5 +1,5 @@
 name: gc14-reference-producer
-# Trigger JJA smoke after transport-audit HISTORY patch.
+# Trigger frozen JJA smoke when reference-producer control/config changes.
 
 on:
   push:
@@ -7,6 +7,9 @@ on:
       - gc14-7-1-reference-producer-v1
     paths:
       - .github/workflows/gc14-reference-producer.yml
+      - scripts/configure_reference_case.py
+      - scripts/patch_history_for_window.py
+      - tests/test_reference_producer_contract.py
   workflow_dispatch:
 
 permissions:
@@ -67,6 +70,7 @@ jobs:
             --end 20190701T010000
           python scripts/patch_history_for_window.py "$RUNDIR/HISTORY.rc" --seconds 3600
           grep -E '^[[:space:]]*SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
+          grep -E '^[[:space:]]*\*[[:space:]]+SPC_[[:space:]].*SpeciesRst_.*[[:space:]]CYS[[:space:]]+xyz' "$RUNDIR/HEMCO_Config.rc"
 
       - name: Configure GCClassic
         run: |
@@ -160,6 +164,7 @@ jobs:
             /tmp/gc14-reference/provenance/
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/REFERENCE_CASE.json
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/geoschem_config.yml
+            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/HEMCO_Config.rc
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/HISTORY.rc
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/log.dryrun
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/download_official_inputs.log
