@@ -64,6 +64,8 @@ jobs:
             --case-id "$CASE_ID" \
             --start 20190701T000000 \
             --end 20190701T010000
+          python scripts/patch_history_for_window.py "$RUNDIR/HISTORY.rc" --seconds 3600
+          grep -E '^SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
 
       - name: Configure GCClassic
         run: |
@@ -157,6 +159,7 @@ jobs:
             /tmp/gc14-reference/provenance/
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/REFERENCE_CASE.json
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/geoschem_config.yml
+            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/HISTORY.rc
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/log.dryrun
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/download_official_inputs.log
             /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/GC.log
