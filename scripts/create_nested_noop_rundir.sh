@@ -53,6 +53,28 @@ for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc species_database.yml dow
   [[ -f "$RUNDIR/$f" ]] || { echo "missing run-directory file: $f" >&2; exit 22; }
 done
 
+# GCClassic 14.7.1 createRunDir.sh correctly regionalizes the dedicated
+# gmao-metfields include but does not regionalize the separate OCEAN_MASK
+# constant-file reference inserted into the main HEMCO_Config.rc from
+# run/shared/settings/gmao_hemco.txt.  The generated EU rundir therefore asks
+# for both CN.$RES.EU.$NC (real regional file) and CN.$RES.$NC (nonexistent in
+# the regional directory).  Correct only that generated data path; no source
+# code, timestep, transport option, threshold, or numerical algorithm changes.
+python3 - "$RUNDIR/HEMCO_Config.rc" <<'PY'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+text = p.read_text()
+old = "1000 OCEAN_MASK  $METDIR/$CNYR/01/$MET.$CNYR0101.CN.$RES.$NC"
+new = "1000 OCEAN_MASK  $METDIR/$CNYR/01/$MET.$CNYR0101.CN.$RES.EU.$NC"
+count = text.count(old)
+if count != 1:
+    raise SystemExit(f"expected exactly one generated OCEAN_MASK path to patch, found {count}")
+p.write_text(text.replace(old, new, 1))
+PY
+
+grep -q 'OCEAN_MASK.*CN\.\$RES\.EU\.\$NC' "$RUNDIR/HEMCO_Config.rc"
+
 python3 "$CONTROL_ROOT/scripts/configure_reference_case.py" \
   --rundir "$RUNDIR" \
   --case-id GCNOOP_NESTED_EU_JJA_20190701_V1 \
@@ -95,6 +117,7 @@ transport_timestep_in_s=300
 expected_transport_steps=12
 boundary_conditions_required=true
 missing_restart_species_policy=CYS
+generated_config_ocean_mask_fix=CN.$RES.EU.$NC
 EOF
 
 echo "$RUNDIR"
