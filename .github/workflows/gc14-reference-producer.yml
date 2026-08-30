@@ -35,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     env:
-      WORKROOT: ${{ runner.temp }}/gc14-reference
+      WORKROOT: /tmp/gc14-reference
     steps:
       - name: Checkout control repository
         uses: actions/checkout@v4
