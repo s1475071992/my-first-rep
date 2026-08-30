@@ -28,10 +28,106 @@ jobs:
         run: python -m pip install --upgrade pytest
 
       - name: Run control-plane contract tests
+        run: python -m pytest -q
+
+  gcclassic-smoke:
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WORKROOT: ${{ runner.temp }}/gc14-reference
+    steps:
+      - name: Checkout control repository
+        uses: actions/checkout@v4
+
+      - name: Install GCClassic build dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential gfortran cmake make git \
+            libnetcdf-dev libnetcdff-dev netcdf-bin \
+            python3 python3-yaml wget
+          echo "=== toolchain ==="
+          gfortran --version | head -n 1
+          cmake --version | head -n 1
+          nc-config --version
+          nf-config --version
+
+      - name: Bootstrap exact GCClassic 14.7.1 source
+        run: bash scripts/bootstrap_gcclassic.sh "$WORKROOT"
+
+      - name: Create global 4x5 MERRA-2 TransportTracers run directory
+        run: |
+          bash scripts/create_transporttracers_rundir.sh \
+            "$WORKROOT/GCClassic" \
+            "$WORKROOT/ExtData" \
+            "$WORKROOT/rundirs"
+
+      - name: Configure GCClassic
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          cd "$RUNDIR/build"
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n \
+            2>&1 | tee "$WORKROOT/cmake.log"
+
+      - name: Compile and install GCClassic
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          cd "$RUNDIR/build"
+          make -j2 2>&1 | tee "$WORKROOT/build.log"
+          make install 2>&1 | tee "$WORKROOT/install.log"
+          test -x "$RUNDIR/gcclassic"
+
+      - name: Execute one-hour dry run
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          cd "$RUNDIR"
+          ./gcclassic --dryrun 2>&1 | tee log.dryrun
+          python "$GITHUB_WORKSPACE/scripts/validate_dryrun.py" \
+            log.dryrun --output dryrun_summary.json
+          python ./download_data.py log.dryrun skip-download \
+            2>&1 | tee download_data_skip.log
+          find . -maxdepth 1 -type f -printf '%f\n' | sort > run_directory_files.txt
+
+      - name: Write provenance
+        run: |
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          python scripts/write_provenance.py \
+            --gcclassic "$WORKROOT/GCClassic" \
+            --rundir "$RUNDIR" \
+            --output "$WORKROOT/provenance/reference_provenance.json"
+          sha256sum \
+            "$RUNDIR/geoschem_config.yml" \
+            "$RUNDIR/HEMCO_Config.rc" \
+            "$RUNDIR/HISTORY.rc" \
+            "$RUNDIR/log.dryrun" \
+            "$RUNDIR/dryrun_summary.json" \
+            > "$WORKROOT/provenance/reference_files.sha256"
+
+      - name: Stage external-reference evidence
+        if: always()
         shell: bash
         run: |
-          if [[ -d tests ]]; then
-            python -m pytest -q
-          else
-            echo "No tests directory yet; workflow bootstrap commit only."
+          mkdir -p evidence
+          if [[ -d "$WORKROOT/provenance" ]]; then cp -a "$WORKROOT/provenance" evidence/; fi
+          for f in cmake.log build.log install.log; do
+            [[ -f "$WORKROOT/$f" ]] && cp "$WORKROOT/$f" evidence/ || true
+          done
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          if [[ -d "$RUNDIR" ]]; then
+            mkdir -p evidence/rundir
+            for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc download_data.yml \
+                     REFERENCE_TIME_WINDOW.txt log.dryrun dryrun_summary.json \
+                     download_data_skip.log run_directory_files.txt; do
+              [[ -f "$RUNDIR/$f" ]] && cp "$RUNDIR/$f" evidence/rundir/ || true
+            done
           fi
+
+      - name: Upload dry-run/build evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-7-1-reference-dryrun-${{ github.run_id }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14
