@@ -240,5 +240,12 @@ jobs:
             config/reference_matrix.json
             /tmp/gc14-release-gate/matrix-work/matrix_acceptance.json
             /tmp/gc14-release-gate/matrix-work/cases/*/evidence/
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/GC.log
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/HEMCO_Config.rc
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/HISTORY.rc
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/geoschem_config.yml
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/REFERENCE_CASE.json
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/log.dryrun
+            /tmp/gc14-release-gate/matrix-work/cases/*/rundir/download_official_inputs.log
           if-no-files-found: ignore
           retention-days: 30
