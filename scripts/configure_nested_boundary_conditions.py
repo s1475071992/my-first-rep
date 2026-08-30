@@ -55,3 +55,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Manual no-op rerun trigger; no runtime semantics changed.
