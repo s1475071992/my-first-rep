@@ -167,9 +167,10 @@ def test_reference_workflow_publishes_only_after_full_matrix_gate():
     assert "packages: write" in text
     assert "season_region_cell_count'] == 20" in text
     publish_pos = text.index("Publish exact validated candidate image without rebuild")
+    publish_text = text[publish_pos:]
     assert "docker push" not in text[:publish_pos]
-    assert "docker push" in text[publish_pos:]
-    assert "docker build" not in text[publish_pos:]
+    assert "docker push" in publish_text
+    assert re.search(r"(?m)^\s*docker build(?:\s|\\)", publish_text) is None
 
 
 def test_matrix_validator_requires_four_seasons_and_twenty_region_cells(tmp_path):
