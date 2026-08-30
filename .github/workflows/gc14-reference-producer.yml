@@ -1,5 +1,7 @@
 name: gc14-reference-producer
-# Run-only reference producer: reuse one explicitly pinned frozen GCClassic build.
+# Release gate: build a local candidate image from the pinned frozen binary,
+# validate the complete 4-season x 5-region reference matrix inside that exact
+# image, and only then publish the same image to GHCR without rebuilding it.
 
 on:
   push:
@@ -7,24 +9,27 @@ on:
       - gc14-7-1-reference-producer-v1
     paths:
       - .github/workflows/gc14-reference-producer.yml
+      - docker/gc14-reference/Dockerfile
       - config/frozen_gcclassic_build.json
       - config/reference_matrix.json
       - scripts/configure_reference_case.py
       - scripts/patch_history_for_window.py
       - scripts/download_official_inputs.sh
       - scripts/validate_dryrun.py
-      - scripts/validate_reference_outputs.py
-      - scripts/write_provenance.py
-      - scripts/package_gc_holdout.py
+      - scripts/validate_reference_pair.py
+      - scripts/validate_reference_matrix.py
+      - scripts/run_reference_matrix.py
       - tests/test_reference_producer_contract.py
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
+  packages: write
 
 env:
   PYTHONUNBUFFERED: "1"
+  WORKROOT: /tmp/gc14-release-gate
 
 jobs:
   contract:
@@ -38,28 +43,13 @@ jobs:
       - name: Control-plane contract tests
         run: python -m pytest -q
 
-  gcclassic-smoke:
+  validate-and-publish:
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    env:
-      WORKROOT: /tmp/gc14-reference
-      CASE_ID: GCEXT_JJA_20190701_SMOKE
+    timeout-minutes: 180
     steps:
       - name: Checkout control repository
         uses: actions/checkout@v4
-
-      - name: Install runtime dependencies only
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y git libnetcdf-dev libnetcdff-dev netcdf-bin curl wget
-          python -m pip install --upgrade pyyaml netCDF4 awscli
-          {
-            echo "python=$(python --version 2>&1)"
-            echo "netcdf_c=$(nc-config --version)"
-            echo "netcdf_fortran=$(nf-config --version)"
-            echo "aws=$(aws --version 2>&1)"
-          } | tee /tmp/runtime_toolchain.txt
 
       - name: Read frozen GCClassic build pin
         id: frozen
@@ -73,18 +63,21 @@ jobs:
           print(f"bundle_filename={pin['bundle_filename']}")
           print(f"bundle_sha256={pin['bundle_sha256']}")
           print(f"executable_sha256={pin['executable_sha256']}")
+          print(f"gcclassic_sha={pin['gcclassic_sha']}")
+          print(f"geoschem_sha={pin['geoschem_sha']}")
+          print(f"hemco_sha={pin['hemco_sha']}")
           PY
 
       - name: Download exact frozen GCClassic build
         uses: actions/download-artifact@v4
         with:
           name: ${{ steps.frozen.outputs.artifact_name }}
-          path: /tmp/gc14-reference/frozen-download
+          path: ${{ env.WORKROOT }}/frozen-download
           github-token: ${{ github.token }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.frozen.outputs.run_id }}
 
-      - name: Restore and verify frozen GCClassic build
+      - name: Restore and verify frozen build for candidate image
         run: |
           DL="$WORKROOT/frozen-download"
           BUNDLE="${{ steps.frozen.outputs.bundle_filename }}"
@@ -94,155 +87,158 @@ jobs:
           cd "$DL"
           echo "${{ steps.frozen.outputs.bundle_sha256 }}  $BUNDLE" | sha256sum -c -
           sha256sum -c "$BUNDLE.sha256"
-          rm -rf "$WORKROOT/GCClassic" "$WORKROOT/provenance" "$WORKROOT/rundirs" "$WORKROOT/frozen_build_manifest.json"
-          tar -xzf "$DL/$BUNDLE" -C "$WORKROOT"
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          test -x "$RUNDIR/gcclassic"
-          test ! -d "$RUNDIR/build"
-          mkdir -p "$WORKROOT/ExtData" "$RUNDIR/OutputDir" "$RUNDIR/Restarts" "$HOME/.geoschem"
-          cat > "$HOME/.geoschem/config" <<EOF
-          export GC_DATA_ROOT=$WORKROOT/ExtData
-          export GC_USER_REGISTERED=true
-          EOF
+          cd "$GITHUB_WORKSPACE"
+          rm -rf .gc14-image-root
+          mkdir -p .gc14-image-root
+          tar -xzf "$DL/$BUNDLE" -C .gc14-image-root
+          test -x .gc14-image-root/rundirs/gc_4x5_merra2_TransportTracers/gcclassic
+          actual=$(sha256sum .gc14-image-root/rundirs/gc_4x5_merra2_TransportTracers/gcclassic | awk '{print $1}')
+          expected="${{ steps.frozen.outputs.executable_sha256 }}"
+          echo "frozen_executable_actual=$actual"
+          echo "frozen_executable_expected=$expected"
+          test "$actual" = "$expected"
+
+      - name: Build candidate image locally - DO NOT PUSH
+        id: candidate
+        run: |
+          LOCAL_IMAGE="gc14-reference-candidate:${GITHUB_SHA}"
+          docker build \
+            -f docker/gc14-reference/Dockerfile \
+            --build-arg CONTROL_REPO_SHA="$GITHUB_SHA" \
+            --build-arg FROZEN_EXECUTABLE_SHA256="${{ steps.frozen.outputs.executable_sha256 }}" \
+            -t "$LOCAL_IMAGE" \
+            .
+          image_id=$(docker image inspect "$LOCAL_IMAGE" --format '{{.Id}}')
+          echo "local_image=$LOCAL_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "image_id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "CANDIDATE_IMAGE_ID=$image_id"
+
+      - name: Verify candidate executable identity
+        run: |
+          actual=$(docker run --rm "${{ steps.candidate.outputs.local_image }}" \
+            sha256sum /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/gcclassic | awk '{print $1}')
+          expected="${{ steps.frozen.outputs.executable_sha256 }}"
+          echo "candidate_executable_actual=$actual"
+          echo "candidate_executable_expected=$expected"
+          test "$actual" = "$expected"
+
+      - name: Run full DJF/MAM/JJA/SON validation matrix
+        run: |
+          rm -rf "$WORKROOT/matrix-work"
+          mkdir -p "$WORKROOT/matrix-work"
+          docker run --rm \
+            -v "$WORKROOT/matrix-work:/work" \
+            -e GC_DATA_ROOT=/work/extdata \
+            -e GC_USER_REGISTERED=true \
+            "${{ steps.candidate.outputs.local_image }}" \
+            python3 /opt/control/scripts/run_reference_matrix.py \
+              --template /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers \
+              --matrix /opt/control/config/reference_matrix.json \
+              --work-root /work \
+              --expected-executable-sha256 "${{ steps.frozen.outputs.executable_sha256 }}"
+
+      - name: Validate release gate - 4 seasons x 5 regions
+        run: |
+          cat "$WORKROOT/matrix-work/matrix_acceptance.json"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          p = Path('/tmp/gc14-release-gate/matrix-work/matrix_acceptance.json')
+          x = json.loads(p.read_text())
+          assert x['status'] == 'PASS'
+          assert x['case_count'] == 4
+          assert x['region_count'] == 5
+          assert x['season_region_cell_count'] == 20
+          assert x['seasons'] == ['DJF', 'MAM', 'JJA', 'SON']
+          assert x['regions'] == ['TROPICS', 'NH_MIDLAT', 'SH_MIDLAT', 'ARCTIC', 'ANTARCTIC']
+          assert x['scientific_thresholds_modified'] is False
+          PY
+
+      - name: Upload complete pre-publication validation evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-7-1-full-matrix-${{ github.run_id }}
+          path: |
+            /tmp/gc14-release-gate/matrix-work/matrix_acceptance.json
+            /tmp/gc14-release-gate/matrix-work/cases/*/evidence/
+          compression-level: 0
+          retention-days: 90
+
+      # Publication begins only after every preceding validation step succeeds.
+      - name: Login to GHCR after full matrix PASS
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish exact validated candidate image without rebuild
+        id: publish
+        run: |
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/gcclassic-reference"
+          IMAGE_TAG="14.7.1-paper1-v1-run-${GITHUB_RUN_ID}"
+          REMOTE_IMAGE="$IMAGE_REPO:$IMAGE_TAG"
+          docker tag "${{ steps.candidate.outputs.local_image }}" "$REMOTE_IMAGE"
+          before_id=$(docker image inspect "${{ steps.candidate.outputs.local_image }}" --format '{{.Id}}')
+          tagged_id=$(docker image inspect "$REMOTE_IMAGE" --format '{{.Id}}')
+          test "$before_id" = "$tagged_id"
+          docker push "$REMOTE_IMAGE"
+          digest=$(docker buildx imagetools inspect "$REMOTE_IMAGE" | awk '/^Digest:/ {print $2; exit}')
+          test -n "$digest"
+          echo "remote_image=$REMOTE_IMAGE" >> "$GITHUB_OUTPUT"
+          echo "image_digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "PUBLISHED_IMAGE=$REMOTE_IMAGE@$digest"
+
+      - name: Write immutable image publication manifest
+        run: |
+          mkdir -p "$WORKROOT/release"
           python - <<'PY'
           import json
           import os
           from pathlib import Path
-          workspace = Path(os.environ['GITHUB_WORKSPACE'])
-          pin = json.loads((workspace / 'config/frozen_gcclassic_build.json').read_text())
-          manifest = json.loads(Path('/tmp/gc14-reference/frozen_build_manifest.json').read_text())
-          assert manifest['build_run_id'] == pin['build_run_id']
-          assert manifest['gcclassic_version'] == pin['gcclassic_version']
-          assert manifest['gcclassic_sha'] == pin['gcclassic_sha']
-          assert manifest['geoschem_sha'] == pin['geoschem_sha']
-          assert manifest['hemco_sha'] == pin['hemco_sha']
-          assert manifest['executable_sha256'] == pin['executable_sha256']
-          PY
-
-      - name: Verify frozen executable identity
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          actual=$(sha256sum "$RUNDIR/gcclassic" | awk '{print $1}')
-          expected="${{ steps.frozen.outputs.executable_sha256 }}"
-          echo "actual=$actual"
-          echo "expected=$expected"
-          test "$actual" = "$expected"
-
-      - name: Freeze transport-only JJA smoke case
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          python scripts/configure_reference_case.py \
-            --rundir "$RUNDIR" \
-            --case-id "$CASE_ID" \
-            --start 20190701T000000 \
-            --end 20190701T010000
-          python scripts/patch_history_for_window.py "$RUNDIR/HISTORY.rc" --seconds 3600
-          grep -E '^[[:space:]]*SpeciesConc\.(frequency|duration):' "$RUNDIR/HISTORY.rc"
-          grep -E '^[[:space:]]*\*[[:space:]]+SPC_[[:space:]].*SpeciesRst_.*[[:space:]]CYS[[:space:]]+xyz' "$RUNDIR/HEMCO_Config.rc"
-
-      - name: Dry-run and freeze official input manifest
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          cd "$RUNDIR"
-          ./gcclassic --dryrun 2>&1 | tee log.dryrun
-          python "$GITHUB_WORKSPACE/scripts/validate_dryrun.py" log.dryrun --output dryrun_summary.json
-          ./download_data.py log.dryrun skip-download 2>&1 | tee download_data_skip.log
-          cp log.dryrun "$WORKROOT/input_manifest_source.log"
-
-      - name: Download only official dry-run inputs
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          bash scripts/download_official_inputs.sh "$RUNDIR" geoschem+aws
-
-      - name: Execute one-hour transport-only GCClassic reference
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          cd "$RUNDIR"
-          set +e
-          ./gcclassic > GC.log 2>&1
-          rc=$?
-          set -e
-          cat GC.log
-          if [[ $rc -ne 0 ]]; then
-            echo "REFERENCE_RUNTIME_FAILURE: gcclassic exit=$rc" >&2
-            exit $rc
-          fi
-          grep -Ei "simulation.*complete|normal.*termination|GEOS-Chem.*complete" GC.log || true
-
-      - name: Validate PassiveTracer endpoint
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          mkdir -p "$WORKROOT/validated"
-          mapfile -t outputs < <(find "$RUNDIR/Restarts" -maxdepth 1 -type f -name 'GEOSChem.Restart.*.nc4' | sort)
-          printf '%s\n' "${outputs[@]}"
-          if [[ ${#outputs[@]} -eq 0 ]]; then
-            echo "REFERENCE_OUTPUT_VALIDATION_FAILURE: no regular restart output" >&2
-            exit 30
-          fi
-          python scripts/validate_reference_outputs.py "${outputs[@]}" --output "$WORKROOT/validated/output_validation.json"
-          cp "${outputs[-1]}" "$WORKROOT/validated/final_restart.nc4"
-
-      - name: Write immutable provenance and package holdout
-        if: success()
-        run: |
-          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          mkdir -p "$WORKROOT/evidence/provenance" "$WORKROOT/evidence/rundir" "$WORKROOT/evidence/output"
-          cp /tmp/runtime_toolchain.txt "$WORKROOT/evidence/provenance/runtime_toolchain.txt"
-          cp "$WORKROOT/provenance/toolchain.txt" "$WORKROOT/evidence/provenance/build_toolchain.txt"
-          cp "$WORKROOT/provenance/source_identity.txt" "$WORKROOT/evidence/provenance/"
-          cp "$WORKROOT/provenance/submodules.txt" "$WORKROOT/evidence/provenance/"
-          cp config/frozen_gcclassic_build.json "$WORKROOT/evidence/provenance/"
-          cp "$WORKROOT/frozen_build_manifest.json" "$WORKROOT/evidence/provenance/"
-          python scripts/write_provenance.py --gcclassic "$WORKROOT/GCClassic" --rundir "$RUNDIR" --output "$WORKROOT/evidence/provenance/reference_provenance.json"
-          python - <<'PY'
-          import json
-          from pathlib import Path
-          out = Path('/tmp/gc14-reference/evidence/provenance/reference_provenance.json')
-          record = json.loads(out.read_text())
           pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
-          manifest = json.loads(Path('/tmp/gc14-reference/frozen_build_manifest.json').read_text())
-          record['frozen_build'] = {
-              'reused_without_recompile': True,
-              'build_run_id': pin['build_run_id'],
-              'artifact_id': pin['artifact_id'],
-              'artifact_name': pin['artifact_name'],
-              'artifact_digest': pin['artifact_digest'],
-              'bundle_sha256': pin['bundle_sha256'],
-              'executable_sha256': pin['executable_sha256'],
-              'build_control_repo_sha': manifest['control_repo_sha'],
+          matrix = json.loads(Path('/tmp/gc14-release-gate/matrix-work/matrix_acceptance.json').read_text())
+          record = {
+              'status': 'PUBLISHED_AFTER_FULL_MATRIX_PASS',
+              'image': '${{ steps.publish.outputs.remote_image }}',
+              'digest': '${{ steps.publish.outputs.image_digest }}',
+              'candidate_image_id': '${{ steps.candidate.outputs.image_id }}',
+              'validation_run_id': int(os.environ['GITHUB_RUN_ID']),
+              'control_repo_sha': os.environ['GITHUB_SHA'],
+              'matrix_id': matrix['matrix_id'],
+              'case_count': matrix['case_count'],
+              'region_count': matrix['region_count'],
+              'season_region_cell_count': matrix['season_region_cell_count'],
+              'matrix_status': matrix['status'],
+              'frozen_build_run_id': pin['build_run_id'],
+              'frozen_build_artifact_id': pin['artifact_id'],
+              'frozen_executable_sha256': pin['executable_sha256'],
+              'gcclassic_sha': pin['gcclassic_sha'],
+              'geoschem_sha': pin['geoschem_sha'],
+              'hemco_sha': pin['hemco_sha'],
+              'scientific_thresholds_modified': False,
           }
+          out = Path('/tmp/gc14-release-gate/release/published_image_manifest.json')
           out.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+          print(out.read_text())
           PY
-          cp "$RUNDIR/REFERENCE_CASE.json" "$RUNDIR/geoschem_config.yml" "$RUNDIR/HEMCO_Config.rc" "$RUNDIR/HISTORY.rc" "$RUNDIR/log.dryrun" "$RUNDIR/download_data_skip.log" "$RUNDIR/download_official_inputs.log" "$RUNDIR/log.dryrun.after_download" "$RUNDIR/GC.log" "$WORKROOT/evidence/rundir/"
-          cp "$WORKROOT/validated/output_validation.json" "$WORKROOT/validated/final_restart.nc4" "$WORKROOT/evidence/output/"
-          python scripts/package_gc_holdout.py --case-id "$CASE_ID" --source-dir "$WORKROOT/evidence" --output-dir "$WORKROOT/package"
 
-      - name: Upload success evidence
-        if: success()
+      - name: Upload immutable publication record
         uses: actions/upload-artifact@v4
         with:
-          name: gc14-7-1-jja-smoke-${{ github.run_id }}
-          path: /tmp/gc14-reference/package/
-          compression-level: 0
-          retention-days: 30
+          name: gc14-7-1-published-image-${{ github.run_id }}
+          path: /tmp/gc14-release-gate/release/published_image_manifest.json
+          retention-days: 90
 
-      - name: Upload failure diagnostics
+      - name: Upload failure diagnostics without publishing
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gc14-7-1-jja-smoke-failure-${{ github.run_id }}
+          name: gc14-7-1-full-matrix-failure-${{ github.run_id }}
           path: |
             config/frozen_gcclassic_build.json
-            /tmp/runtime_toolchain.txt
-            /tmp/gc14-reference/frozen-download/frozen_build_manifest.json
-            /tmp/gc14-reference/frozen_build_manifest.json
-            /tmp/gc14-reference/provenance/
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/REFERENCE_CASE.json
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/geoschem_config.yml
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/HEMCO_Config.rc
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/HISTORY.rc
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/log.dryrun
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/download_official_inputs.log
-            /tmp/gc14-reference/rundirs/gc_4x5_merra2_TransportTracers/GC.log
+            config/reference_matrix.json
+            /tmp/gc14-release-gate/matrix-work/matrix_acceptance.json
+            /tmp/gc14-release-gate/matrix-work/cases/*/evidence/
           if-no-files-found: ignore
-          retention-days: 14
+          retention-days: 30

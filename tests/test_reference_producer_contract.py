@@ -2,6 +2,7 @@ from pathlib import Path
 import importlib.util
 import json
 import re
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -25,11 +26,15 @@ def test_required_reference_producer_files_exist():
         "scripts/patch_history_for_window.py",
         "scripts/download_official_inputs.sh",
         "scripts/validate_reference_outputs.py",
+        "scripts/validate_reference_pair.py",
+        "scripts/validate_reference_matrix.py",
+        "scripts/run_reference_matrix.py",
         "scripts/package_gc_holdout.py",
         "config/reference_matrix.json",
         "config/frozen_gcclassic_build.json",
         ".github/workflows/gc14-build.yml",
         ".github/workflows/gc14-reference-producer.yml",
+        "docker/gc14-reference/Dockerfile",
         "docs/GC_DISCREPANCY_AUDIT_PROTOCOL_V1.md",
     ]
     missing = [path for path in required if not (ROOT / path).is_file()]
@@ -133,8 +138,7 @@ def test_reference_workflow_reuses_frozen_build_without_compiling():
     assert "config/frozen_gcclassic_build.json" in text
     assert "run-id: ${{ steps.frozen.outputs.run_id }}" in text
     assert "sha256sum -c" in text
-    assert "frozen_build_manifest.json" in text
-    assert "Verify frozen executable identity" in text
+    assert "Verify candidate executable identity" in text
     forbidden = [
         "bash scripts/bootstrap_gcclassic.sh",
         "bash scripts/create_transporttracers_rundir.sh",
@@ -145,4 +149,60 @@ def test_reference_workflow_reuses_frozen_build_without_compiling():
         "gfortran",
     ]
     for marker in forbidden:
-        assert marker not in text, f"reference workflow must be run-only; found {marker!r}"
+        assert marker not in text, f"reference workflow must not compile GCClassic; found {marker!r}"
+
+
+def test_reference_workflow_publishes_only_after_full_matrix_gate():
+    text = (ROOT / ".github/workflows/gc14-reference-producer.yml").read_text()
+    markers = [
+        "Build candidate image locally - DO NOT PUSH",
+        "Run full DJF/MAM/JJA/SON validation matrix",
+        "Validate release gate - 4 seasons x 5 regions",
+        "Upload complete pre-publication validation evidence",
+        "Login to GHCR after full matrix PASS",
+        "Publish exact validated candidate image without rebuild",
+    ]
+    positions = [text.index(marker) for marker in markers]
+    assert positions == sorted(positions)
+    assert "packages: write" in text
+    assert "season_region_cell_count'] == 20" in text
+    publish_pos = text.index("Publish exact validated candidate image without rebuild")
+    assert "docker push" not in text[:publish_pos]
+    assert "docker push" in text[publish_pos:]
+    assert "docker build" not in text[publish_pos:]
+
+
+def test_matrix_validator_requires_four_seasons_and_twenty_region_cells(tmp_path):
+    module = load_script(ROOT / "scripts/validate_reference_matrix.py", "validate_reference_matrix")
+    matrix = json.loads((ROOT / "config/reference_matrix.json").read_text())
+    expected_sha = "a" * 64
+    root = tmp_path / "cases"
+    for case in matrix["cases"]:
+        evidence = root / case["case_id"] / "evidence"
+        evidence.mkdir(parents=True)
+        regions = {
+            item["region_id"]: {"status": "PASS"}
+            for item in matrix["holdout_regions"]
+        }
+        (evidence / "pair_acceptance.json").write_text(json.dumps({
+            "status": "PASS",
+            "season": case["season"],
+            "executable_sha256": expected_sha,
+            "regions": regions,
+        }))
+        (evidence / "runtime_status.json").write_text(json.dumps({
+            "status": "PASS",
+            "executable_sha256": expected_sha,
+        }))
+    result = module.validate(matrix, root, expected_sha)
+    assert result["status"] == "PASS"
+    assert result["case_count"] == 4
+    assert result["region_count"] == 5
+    assert result["season_region_cell_count"] == 20
+
+    broken = root / matrix["cases"][0]["case_id"] / "evidence" / "pair_acceptance.json"
+    payload = json.loads(broken.read_text())
+    payload["regions"].pop("ARCTIC")
+    broken.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="region order/set mismatch"):
+        module.validate(matrix, root, expected_sha)
