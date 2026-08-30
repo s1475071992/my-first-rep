@@ -1,9 +1,6 @@
 name: gc14-reference-producer
 
 on:
-  push:
-    branches:
-      - gc14-7-1-reference-producer-v1
   workflow_dispatch:
 
 permissions:
@@ -13,97 +10,50 @@ env:
   PYTHONUNBUFFERED: "1"
 
 jobs:
-  benchmark-restart-probe:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Probe official 14.0.0 ten-year benchmark restart directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE_HTTP="http://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
-          BASE_HTTPS="https://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
-          mkdir -p probe
-          for base in "$BASE_HTTPS" "$BASE_HTTP"; do
-            echo "### DIRECTORY $base" | tee -a probe/restart_probe.txt
-            curl -fL --max-time 30 "$base/" 2>&1 | head -n 200 | tee -a probe/restart_probe.txt || true
-          done
-          for date in 20190101 20190401 20190701 20191001; do
-            for name in \
-              "GEOSChem.Restart.${date}_0000z.nc4" \
-              "GEOSChem.Restart.fullchem.${date}_0000z.nc4"; do
-              for base in "$BASE_HTTPS" "$BASE_HTTP"; do
-                url="$base/$name"
-                status=$(curl -L -sS -o /dev/null -w '%{http_code}' --max-time 30 "$url" || true)
-                printf '%s %s\n' "$status" "$url" | tee -a probe/restart_probe.txt
-              done
-            done
-          done
-
-      - name: Upload probe evidence
-        uses: actions/upload-artifact@v4
-        with:
-          name: gc14-benchmark-restart-probe-${{ github.run_id }}
-          path: probe/restart_probe.txt
-          retention-days: 14
-
   contract:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout control repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
-      - name: Install control-plane test dependency
+      - name: Install test dependency
         run: python -m pip install --upgrade pytest
-
       - name: Run control-plane contract tests
         run: python -m pytest -q
 
   gcclassic-smoke:
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       WORKROOT: /tmp/gc14-reference
     steps:
       - name: Checkout control repository
         uses: actions/checkout@v4
-
       - name: Install GCClassic build dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential gfortran cmake make git \
-            libnetcdf-dev libnetcdff-dev netcdf-bin \
-            python3 python3-yaml wget
-          echo "=== toolchain ==="
+          sudo apt-get install -y build-essential gfortran cmake make git libnetcdf-dev libnetcdff-dev netcdf-bin python3 python3-yaml wget curl
           gfortran --version | head -n 1
           cmake --version | head -n 1
           nc-config --version
           nf-config --version
-
       - name: Bootstrap exact GCClassic 14.7.1 source
         run: bash scripts/bootstrap_gcclassic.sh "$WORKROOT"
-
       - name: Create global 4x5 MERRA-2 TransportTracers run directory
+        run: bash scripts/create_transporttracers_rundir.sh "$WORKROOT/GCClassic" "$WORKROOT/ExtData" "$WORKROOT/rundirs"
+      - name: Configure reference case
         run: |
-          bash scripts/create_transporttracers_rundir.sh \
-            "$WORKROOT/GCClassic" \
-            "$WORKROOT/ExtData" \
-            "$WORKROOT/rundirs"
-
+          RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
+          python scripts/configure_reference_case.py --rundir "$RUNDIR" --case-id smoke_20190701 --start 20190701T000000 --end 20190701T010000
       - name: Configure GCClassic
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
           cd "$RUNDIR/build"
-          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n \
-            2>&1 | tee "$WORKROOT/cmake.log"
-
+          cmake ../CodeDir -DRUNDIR=.. -DCMAKE_BUILD_TYPE=Release -DOMP=n 2>&1 | tee "$WORKROOT/cmake.log"
       - name: Compile and install GCClassic
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
@@ -111,53 +61,32 @@ jobs:
           make -j2 2>&1 | tee "$WORKROOT/build.log"
           make install 2>&1 | tee "$WORKROOT/install.log"
           test -x "$RUNDIR/gcclassic"
-
-      - name: Execute dry run
+      - name: Execute dry run and freeze input manifest
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
           cd "$RUNDIR"
           ./gcclassic --dryrun 2>&1 | tee log.dryrun
-          python "$GITHUB_WORKSPACE/scripts/validate_dryrun.py" \
-            log.dryrun --output dryrun_summary.json
-          python ./download_data.py log.dryrun skip-download \
-            2>&1 | tee download_data_skip.log
-          find . -maxdepth 1 -type f -printf '%f\n' | sort > run_directory_files.txt
-
+          python "$GITHUB_WORKSPACE/scripts/validate_dryrun.py" log.dryrun --output dryrun_summary.json
+          python ./download_data.py log.dryrun skip-download 2>&1 | tee download_data_skip.log
+          cp log.dryrun "$WORKROOT/input_manifest_source.log"
       - name: Write provenance
         run: |
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
-          python scripts/write_provenance.py \
-            --gcclassic "$WORKROOT/GCClassic" \
-            --rundir "$RUNDIR" \
-            --output "$WORKROOT/provenance/reference_provenance.json"
-          sha256sum \
-            "$RUNDIR/geoschem_config.yml" \
-            "$RUNDIR/HEMCO_Config.rc" \
-            "$RUNDIR/HISTORY.rc" \
-            "$RUNDIR/log.dryrun" \
-            "$RUNDIR/dryrun_summary.json" \
-            > "$WORKROOT/provenance/reference_files.sha256"
-
-      - name: Stage external-reference evidence
+          mkdir -p "$WORKROOT/provenance"
+          python scripts/write_provenance.py --gcclassic "$WORKROOT/GCClassic" --rundir "$RUNDIR" --output "$WORKROOT/provenance/reference_provenance.json"
+          sha256sum "$RUNDIR/geoschem_config.yml" "$RUNDIR/HEMCO_Config.rc" "$RUNDIR/HISTORY.rc" "$RUNDIR/log.dryrun" "$RUNDIR/dryrun_summary.json" > "$WORKROOT/provenance/reference_files.sha256"
+      - name: Stage evidence
         if: always()
-        shell: bash
         run: |
           mkdir -p evidence
-          if [[ -d "$WORKROOT/provenance" ]]; then cp -a "$WORKROOT/provenance" evidence/; fi
-          for f in cmake.log build.log install.log; do
-            [[ -f "$WORKROOT/$f" ]] && cp "$WORKROOT/$f" evidence/ || true
-          done
+          cp -a "$WORKROOT/provenance" evidence/ 2>/dev/null || true
+          for f in cmake.log build.log install.log input_manifest_source.log; do [[ -f "$WORKROOT/$f" ]] && cp "$WORKROOT/$f" evidence/ || true; done
           RUNDIR="$WORKROOT/rundirs/gc_4x5_merra2_TransportTracers"
           if [[ -d "$RUNDIR" ]]; then
             mkdir -p evidence/rundir
-            for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc download_data.yml \
-                     REFERENCE_TIME_WINDOW.txt log.dryrun dryrun_summary.json \
-                     download_data_skip.log run_directory_files.txt; do
-              [[ -f "$RUNDIR/$f" ]] && cp "$RUNDIR/$f" evidence/rundir/ || true
-            done
+            for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc download_data.yml REFERENCE_CASE.json log.dryrun dryrun_summary.json download_data_skip.log; do [[ -f "$RUNDIR/$f" ]] && cp "$RUNDIR/$f" evidence/rundir/ || true; done
           fi
-
-      - name: Upload dry-run/build evidence
+      - name: Upload build/dry-run evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
