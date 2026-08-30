@@ -1,0 +1,61 @@
+{
+  "matrix_id": "GC14_7_1_GLOBAL_SEASONAL_HOLDOUT_MATRIX_V1",
+  "status": "FROZEN_BEFORE_FORMAL_SCORING",
+  "geoschem_as_training_truth": false,
+  "gcclassic": {
+    "wrapper_tag": "14.7.1",
+    "wrapper_release_commit": "c36ecd760c6663a62769f05a7449c927b8faf54b",
+    "science_commit": "b9f570e2c7a98b308004cd07e2985a12a47b6f5c",
+    "simulation": "TransportTracers",
+    "primary_tracer": "PassiveTracer",
+    "grid": "4x5",
+    "vertical_levels": 72,
+    "met": "MERRA2"
+  },
+  "cases": [
+    {
+      "case_id": "GCEXT_DJF_20190101",
+      "season": "DJF",
+      "start_date": "2019-01-01T00:00:00Z",
+      "duration_seconds": 3600,
+      "met": "MERRA2",
+      "grid": "4x5"
+    },
+    {
+      "case_id": "GCEXT_MAM_20190401",
+      "season": "MAM",
+      "start_date": "2019-04-01T00:00:00Z",
+      "duration_seconds": 3600,
+      "met": "MERRA2",
+      "grid": "4x5"
+    },
+    {
+      "case_id": "GCEXT_JJA_20190701",
+      "season": "JJA",
+      "start_date": "2019-07-01T00:00:00Z",
+      "duration_seconds": 3600,
+      "met": "MERRA2",
+      "grid": "4x5"
+    },
+    {
+      "case_id": "GCEXT_SON_20191001",
+      "season": "SON",
+      "start_date": "2019-10-01T00:00:00Z",
+      "duration_seconds": 3600,
+      "met": "MERRA2",
+      "grid": "4x5"
+    }
+  ],
+  "holdout_regions": [
+    {"region_id": "TROPICS", "lat_min": -23.5, "lat_max": 23.5},
+    {"region_id": "NH_MIDLAT", "lat_min": 30.0, "lat_max": 60.0},
+    {"region_id": "SH_MIDLAT", "lat_min": -60.0, "lat_max": -30.0},
+    {"region_id": "ARCTIC", "lat_min": 66.5, "lat_max": 90.0},
+    {"region_id": "ANTARCTIC", "lat_min": -90.0, "lat_max": -66.5}
+  ],
+  "claim_boundary": {
+    "training_truth": "INTERNAL_SAME_FAMILY_HF_ONLY",
+    "geoschem_role": "OPTIONAL_EXTERNAL_HOLDOUT_AUDIT",
+    "l5_forward_equivalence": "NOT_CLAIMED"
+  }
+}
