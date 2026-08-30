@@ -26,12 +26,26 @@ def patch_speciesconc(path: Path, seconds: int) -> None:
     path.write_text(text)
 
 
+def patch_for_transport_audit(path: Path, seconds: int) -> None:
+    text = path.read_text()
+    collections = re.compile(r"^COLLECTIONS:.*?^::\s*$", re.MULTILINE | re.DOTALL)
+    text, count = collections.subn(
+        "COLLECTIONS: 'Restart',\n             'SpeciesConc',\n::",
+        text,
+        count=1,
+    )
+    if count != 1:
+        raise RuntimeError("expected one COLLECTIONS declaration block")
+    path.write_text(text)
+    patch_speciesconc(path, seconds)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("history")
     parser.add_argument("--seconds", type=int, required=True)
     args = parser.parse_args()
-    patch_speciesconc(Path(args.history), args.seconds)
+    patch_for_transport_audit(Path(args.history), args.seconds)
 
 
 if __name__ == "__main__":
