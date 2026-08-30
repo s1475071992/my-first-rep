@@ -75,6 +75,19 @@ def test_official_outputs_are_instantaneous():
         assert forbidden not in text.lower()
 
 
+def test_instantaneous_state_file_duration_exceeds_sampling_frequency():
+    """GC14.7.1 does not create the t=0 file when instantaneous frequency==duration."""
+    text = OUTPUT_CFG.read_text()
+    assert "p.add_argument('--file-duration-seconds', type=int, default=3600)" in text
+    assert 'file_duration = interval(file_duration_seconds)' in text
+    assert 'SpeciesConc.duration:       {file_duration}' in text
+    assert 'StateMet.duration:          {file_duration}' in text
+    assert 'StateMetLevEdge.duration:    {file_duration}' in text
+    assert 'SpeciesConc.duration:       {freq}' not in text
+    assert 'StateMet.duration:          {freq}' not in text
+    assert 'StateMetLevEdge.duration:    {freq}' not in text
+
+
 def test_packer_and_validator_are_part_of_formal_contract():
     assert PACKER.exists(), 'missing scripts/pack_transport_audit.py'
     assert VALIDATOR.exists(), 'missing scripts/validate_transport_audit.py'
