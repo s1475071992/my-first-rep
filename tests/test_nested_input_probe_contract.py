@@ -75,6 +75,13 @@ def test_nested_eu_ocean_mask_uses_regional_constants_file():
     assert "CN.$RES.$NC" in text
 
 
+def test_nested_restart_is_forced_through_hemco():
+    """GC14.7.1 forbids read_restart_as_real8=true for nested grids."""
+    text = CREATE.read_text()
+    assert "read_restart_as_real8" in text
+    assert "read_restart_as_real8'] = False" in text or 'read_restart_as_real8"] = False' in text
+
+
 def test_audit_script_classifies_required_input_families():
     assert AUDIT.exists(), "missing scripts/audit_nested_dryrun.py"
     text = AUDIT.read_text()
