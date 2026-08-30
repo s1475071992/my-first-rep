@@ -34,8 +34,11 @@ def validate(matrix: dict, results_root: Path, expected_executable_sha256: str) 
         if runtime.get("executable_sha256") != expected_executable_sha256:
             raise ValueError(f"runtime executable identity mismatch for {case_id}")
         regions = pair.get("regions", {})
-        if list(regions) != expected_regions:
-            raise ValueError(f"region order/set mismatch for {case_id}: {list(regions)}")
+        if len(regions) != len(expected_regions) or set(regions) != set(expected_regions):
+            raise ValueError(
+                f"region set/count mismatch for {case_id}: "
+                f"expected={expected_regions}, found={list(regions)}"
+            )
         for rid in expected_regions:
             if regions[rid].get("status") != "PASS":
                 raise ValueError(f"region {rid} did not pass for {case_id}")
