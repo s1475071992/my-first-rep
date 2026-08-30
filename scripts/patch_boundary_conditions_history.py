@@ -12,8 +12,12 @@ COLLECTION_BLOCK = """COLLECTIONS: 'Restart',
 # Keep the metadata/field syntax byte-for-byte equivalent to the official
 # GCClassic 14.7.1 fullchem BoundaryConditions collection, while activating
 # only Restart + BoundaryConditions for this dedicated BC producer.
-BC_BLOCK = """
-#==============================================================================
+#
+# Important parser invariant for GCClassic 14.7.1: when this block is appended
+# after an inactive collection, it must begin immediately after the preceding
+# "::\n" terminator. A blank line there can cause History_ReadCollectionData
+# to skip the next active collection while C remains UNDEFINED_INT.
+BC_BLOCK = """#==============================================================================
 # %%%%% THE BoundaryConditions COLLECTION %%%%%
 #
 # GEOS-Chem boundary conditions for use in nested grid simulations
