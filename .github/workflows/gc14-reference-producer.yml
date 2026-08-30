@@ -20,6 +20,7 @@ on:
       - scripts/validate_reference_matrix.py
       - scripts/run_reference_matrix.py
       - tests/test_reference_producer_contract.py
+      - tests/test_control_plane_provenance_contract.py
   workflow_dispatch:
 
 permissions:
@@ -122,9 +123,64 @@ jobs:
           echo "candidate_executable_expected=$expected"
           test "$actual" = "$expected"
 
-      - name: Run full DJF/MAM/JJA/SON validation matrix
+      - name: Verify candidate control-plane provenance
         run: |
           rm -rf "$WORKROOT/matrix-work"
+          mkdir -p "$WORKROOT/matrix-work"
+          image="${{ steps.candidate.outputs.local_image }}"
+          checkout_control_sha="$GITHUB_SHA"
+          image_control_sha=$(docker image inspect "$image" --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          checkout_matrix_sha=$(sha256sum scripts/run_reference_matrix.py | awk '{print $1}')
+          image_matrix_sha=$(docker run --rm "$image" sha256sum /opt/control/scripts/run_reference_matrix.py | awk '{print $1}')
+          checkout_pair_sha=$(sha256sum scripts/validate_reference_pair.py | awk '{print $1}')
+          image_pair_sha=$(docker run --rm "$image" sha256sum /opt/control/scripts/validate_reference_pair.py | awk '{print $1}')
+          export CHECKOUT_CONTROL_SHA="$checkout_control_sha"
+          export IMAGE_CONTROL_SHA="$image_control_sha"
+          export CHECKOUT_MATRIX_SHA="$checkout_matrix_sha"
+          export IMAGE_MATRIX_SHA="$image_matrix_sha"
+          export CHECKOUT_PAIR_SHA="$checkout_pair_sha"
+          export IMAGE_PAIR_SHA="$image_pair_sha"
+          export CANDIDATE_IMAGE_ID="${{ steps.candidate.outputs.image_id }}"
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          control_match = os.environ['CHECKOUT_CONTROL_SHA'] == os.environ['IMAGE_CONTROL_SHA']
+          matrix_match = os.environ['CHECKOUT_MATRIX_SHA'] == os.environ['IMAGE_MATRIX_SHA']
+          pair_match = os.environ['CHECKOUT_PAIR_SHA'] == os.environ['IMAGE_PAIR_SHA']
+          passed = control_match and matrix_match and pair_match
+          record = {
+              'status': 'PASS' if passed else 'FAIL',
+              'control_repo_sha': os.environ['CHECKOUT_CONTROL_SHA'],
+              'candidate_image_control_repo_sha': os.environ['IMAGE_CONTROL_SHA'],
+              'control_repo_sha_match': control_match,
+              'candidate_image_id': os.environ['CANDIDATE_IMAGE_ID'],
+              'scripts': {
+                  'scripts/run_reference_matrix.py': {
+                      'checkout_sha256': os.environ['CHECKOUT_MATRIX_SHA'],
+                      'candidate_image_path': '/opt/control/scripts/run_reference_matrix.py',
+                      'candidate_image_sha256': os.environ['IMAGE_MATRIX_SHA'],
+                      'match': matrix_match,
+                  },
+                  'scripts/validate_reference_pair.py': {
+                      'checkout_sha256': os.environ['CHECKOUT_PAIR_SHA'],
+                      'candidate_image_path': '/opt/control/scripts/validate_reference_pair.py',
+                      'candidate_image_sha256': os.environ['IMAGE_PAIR_SHA'],
+                      'match': pair_match,
+                  },
+              },
+              'scientific_thresholds_modified': False,
+          }
+          out = Path('/tmp/gc14-release-gate/matrix-work/control_plane_provenance.json')
+          out.write_text(json.dumps(record, indent=2, sort_keys=True) + '\n')
+          print(out.read_text())
+          if not passed:
+              raise SystemExit('control-plane provenance mismatch')
+          PY
+
+      - name: Run full DJF/MAM/JJA/SON validation matrix
+        run: |
           mkdir -p "$WORKROOT/matrix-work"
           docker run --rm \
             -v "$WORKROOT/matrix-work:/work" \
@@ -159,6 +215,7 @@ jobs:
         with:
           name: gc14-7-1-full-matrix-${{ github.run_id }}
           path: |
+            /tmp/gc14-release-gate/matrix-work/control_plane_provenance.json
             /tmp/gc14-release-gate/matrix-work/matrix_acceptance.json
             /tmp/gc14-release-gate/matrix-work/cases/*/evidence/
           compression-level: 0
@@ -238,6 +295,7 @@ jobs:
           path: |
             config/frozen_gcclassic_build.json
             config/reference_matrix.json
+            /tmp/gc14-release-gate/matrix-work/control_plane_provenance.json
             /tmp/gc14-release-gate/matrix-work/matrix_acceptance.json
             /tmp/gc14-release-gate/matrix-work/cases/*/evidence/
             /tmp/gc14-release-gate/matrix-work/cases/*/rundir/GC.log
