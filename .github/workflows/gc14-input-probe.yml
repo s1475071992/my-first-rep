@@ -14,27 +14,47 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Probe official 14.0.0 ten-year benchmark restart directory
+      - name: Probe official restart archives and S3 mirrors
         shell: bash
         run: |
           set -euo pipefail
-          BASE_HTTP="http://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
-          BASE_HTTPS="https://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"
           mkdir -p probe
-          for base in "$BASE_HTTPS" "$BASE_HTTP"; do
-            echo "### DIRECTORY $base" | tee -a probe/restart_probe.txt
-            curl -fL --max-time 30 "$base/" 2>&1 | head -n 200 | tee -a probe/restart_probe.txt || true
+          OUT=probe/restart_probe.txt
+
+          echo '### HARVARD ARCHIVE DNS/HTTP PROBE' | tee -a "$OUT"
+          for base in \
+            "https://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts" \
+            "http://ftp.as.harvard.edu/gcgrid/geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts"; do
+            echo "### DIRECTORY $base" | tee -a "$OUT"
+            curl -fL --max-time 20 "$base/" 2>&1 | head -n 80 | tee -a "$OUT" || true
           done
-          for date in 20190101 20190401 20190701 20191001; do
-            for name in \
-              "GEOSChem.Restart.${date}_0000z.nc4" \
-              "GEOSChem.Restart.fullchem.${date}_0000z.nc4"; do
-              for base in "$BASE_HTTPS" "$BASE_HTTP"; do
-                url="$base/$name"
-                status=$(curl -L -sS -o /dev/null -w '%{http_code}' --max-time 30 "$url" || true)
-                printf '%s %s\n' "$status" "$url" | tee -a probe/restart_probe.txt
-              done
+
+          echo '### OFFICIAL S3 LIST PROBES' | tee -a "$OUT"
+          for endpoint in \
+            "https://geos-chem.s3-us-west-2.amazonaws.com" \
+            "https://gcgrid.s3.amazonaws.com"; do
+            for prefix in \
+              "10yr_benchmarks/14.0.0/GCClassic/restarts/" \
+              "geos-chem/10yr_benchmarks/14.0.0/GCClassic/restarts/" \
+              "ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/"; do
+              echo "### S3 $endpoint prefix=$prefix" | tee -a "$OUT"
+              curl -fsSL --max-time 30 \
+                "$endpoint/?list-type=2&max-keys=200&prefix=$prefix" \
+                | tr '>' '>\n' \
+                | grep -E '<Key>|<Size>|<KeyCount>|<IsTruncated>' \
+                | head -n 250 \
+                | tee -a "$OUT" || true
             done
+          done
+
+          echo '### CURRENT OFFICIAL SAMPLE/FULLCHEM HEAD PROBES' | tee -a "$OUT"
+          for url in \
+            "https://geos-chem.s3-us-west-2.amazonaws.com/ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/GEOSChem.Restart.TransportTracers.20190101_0000z.nc4" \
+            "https://geos-chem.s3-us-west-2.amazonaws.com/ExtData/GEOSCHEM_RESTARTS/GC_14.7.0/GEOSChem.Restart.fullchem.20190701_0000z.nc4"; do
+            echo "URL $url" | tee -a "$OUT"
+            curl -ILsS --max-time 30 "$url" \
+              | grep -Ei 'HTTP/|content-length:|last-modified:|etag:' \
+              | tee -a "$OUT" || true
           done
 
       - name: Upload probe evidence
