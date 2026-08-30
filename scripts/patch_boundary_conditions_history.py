@@ -9,18 +9,24 @@ COLLECTION_BLOCK = """COLLECTIONS: 'Restart',
              'BoundaryConditions',
 ::"""
 
+# Keep the metadata/field syntax byte-for-byte equivalent to the official
+# GCClassic 14.7.1 fullchem BoundaryConditions collection, while activating
+# only Restart + BoundaryConditions for this dedicated BC producer.
 BC_BLOCK = """
 #==============================================================================
 # %%%%% THE BoundaryConditions COLLECTION %%%%%
 #
-# TransportTracers boundary conditions for the pinned nested qualification.
-# Source-authentic cadence: instantaneous advected-species fields every 3 h.
+# GEOS-Chem boundary conditions for use in nested grid simulations
+#
+# NOTE: Do not change the BoundaryConditions.frequency setting below,
+# because GEOS-Chem nested-grid simulations expect to read boundary
+# condition data at 3 hour intervals.
 #==============================================================================
   BoundaryConditions.template:   '%y4%m2%d2_%h2%n2z.nc4',
   BoundaryConditions.frequency:  00000000 030000
   BoundaryConditions.duration:   00000001 000000
   BoundaryConditions.mode:       'instantaneous'
-  BoundaryConditions.fields:     'SpeciesBC_?ADV?             ', 'GIGCchem',
+  BoundaryConditions.fields:     'SpeciesBC_?ADV?             ',
 ::
 """
 
