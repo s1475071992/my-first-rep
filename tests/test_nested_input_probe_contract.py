@@ -3,8 +3,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CASE = ROOT / "config" / "nested_noop_case.json"
+BC_CASE = ROOT / "config" / "transporttracers_bc_producer.json"
 CREATE = ROOT / "scripts" / "create_nested_noop_rundir.sh"
 AUDIT = ROOT / "scripts" / "audit_nested_dryrun.py"
+PATCH_BC_HISTORY = ROOT / "scripts" / "patch_boundary_conditions_history.py"
+CONFIGURE_NESTED_BC = ROOT / "scripts" / "configure_nested_boundary_conditions.py"
 WORKFLOW = ROOT / ".github" / "workflows" / "gc14-input-probe.yml"
 
 
@@ -34,6 +37,25 @@ def test_nested_case_contract_is_pinned():
     assert case["scientific_thresholds_modified"] is False
 
 
+def test_bc_producer_contract_is_pinned():
+    assert BC_CASE.exists(), "missing config/transporttracers_bc_producer.json"
+    case = json.loads(BC_CASE.read_text())
+    assert case["producer_id"] == "GC14_7_1_TRANSPORTTRACERS_BC_PRODUCER_V1"
+    assert case["source_domain"] == "GLOBAL_LATLON"
+    assert case["grid"] == "4x5"
+    assert case["met"] == "MERRA2"
+    assert case["simulation"] == "TransportTracers"
+    assert case["primary_tracer"] == "PassiveTracer"
+    assert case["start_date"] == "2019-07-01T00:00:00Z"
+    assert case["duration_seconds"] == 10800
+    assert case["transport_timestep_seconds"] == 600
+    assert case["bc_frequency_seconds"] == 10800
+    assert case["bc_mode"] == "instantaneous"
+    assert case["bc_fields"] == "SpeciesBC_?ADV?"
+    assert case["target_nested_case_id"] == "GCNOOP_NESTED_EU_JJA_20190701_V1"
+    assert case["scientific_thresholds_modified"] is False
+
+
 def test_rundir_script_uses_official_creator_and_dryrun_only_contract():
     assert CREATE.exists(), "missing scripts/create_nested_noop_rundir.sh"
     text = CREATE.read_text()
@@ -60,7 +82,25 @@ def test_audit_script_classifies_required_input_families():
         assert token in text
 
 
-def test_workflow_is_probe_only_and_uploads_required_evidence():
+def test_bc_history_patch_is_minimal_and_three_hourly():
+    assert PATCH_BC_HISTORY.exists(), "missing scripts/patch_boundary_conditions_history.py"
+    text = PATCH_BC_HISTORY.read_text()
+    for token in ["BoundaryConditions", "SpeciesBC_?ADV?", "030000", "instantaneous", "Restart"]:
+        assert token in text
+    for forbidden in ["CloudConvFlux", "StateMet", "RadioNuclide"]:
+        assert forbidden not in text
+
+
+def test_nested_bc_configurer_enables_gc_bcs_without_touching_numerics():
+    assert CONFIGURE_NESTED_BC.exists(), "missing scripts/configure_nested_boundary_conditions.py"
+    text = CONFIGURE_NESTED_BC.read_text()
+    for token in ["GC_BCs", "BC_", "SpeciesBC_?ADV?", "boundary"]:
+        assert token in text
+    for forbidden in ["IORD", "JORD", "KORD", "transport_timestep_in_s", "gcclassic_tpcore"]:
+        assert forbidden not in text
+
+
+def test_workflow_produces_bc_then_reprobes_nested_without_fortran_changes():
     text = WORKFLOW.read_text()
     for token in [
         "gcclassic --dryrun",
@@ -72,9 +112,14 @@ def test_workflow_is_probe_only_and_uploads_required_evidence():
         "species_database.yml",
         "nested_input_probe.json",
         "control_sha256.txt",
+        "patch_boundary_conditions_history.py",
+        "configure_nested_boundary_conditions.py",
+        "BoundaryConditions",
+        "SpeciesBC_PassiveTracer",
+        "./gcclassic > BC_GC.log 2>&1",
         "actions/upload-artifact@v4",
     ]:
         assert token in text
-    forbidden = ["docker/login-action", "docker push", "ghcr.io", "./gcclassic >", "./gcclassic 2>"]
+    forbidden = ["docker/login-action", "docker push", "ghcr.io", "cmake --build", "transport_audit_mod.F90"]
     for token in forbidden:
         assert token not in text
