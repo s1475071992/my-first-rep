@@ -1,0 +1,22 @@
+{
+  "producer_id": "GC14_7_1_TRANSPORTTRACERS_BC_PRODUCER_V1",
+  "purpose": "NESTED_QUALIFICATION_INPUT_PRODUCER",
+  "source_domain": "GLOBAL_LATLON",
+  "grid": "4x5",
+  "met": "MERRA2",
+  "vertical_levels": 72,
+  "simulation": "TransportTracers",
+  "primary_tracer": "PassiveTracer",
+  "start_date": "2019-07-01T00:00:00Z",
+  "duration_seconds": 10800,
+  "transport_timestep_seconds": 600,
+  "bc_frequency_seconds": 10800,
+  "bc_mode": "instantaneous",
+  "bc_fields": "SpeciesBC_?ADV?",
+  "target_nested_case_id": "GCNOOP_NESTED_EU_JJA_20190701_V1",
+  "gcclassic_tag": "14.7.1",
+  "gcclassic_sha": "c36ecd760c6663a62769f05a7449c927b8faf54b",
+  "geoschem_sha": "b9f570e2c7a98b308004cd07e2985a12a47b6f5c",
+  "hemco_sha": "07da3c29fd85abc3824cb6288578b0b68c2395a3",
+  "scientific_thresholds_modified": false
+}
