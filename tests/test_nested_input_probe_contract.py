@@ -87,6 +87,8 @@ def test_bc_history_patch_is_minimal_and_three_hourly():
     text = PATCH_BC_HISTORY.read_text()
     for token in ["BoundaryConditions", "SpeciesBC_?ADV?", "030000", "instantaneous", "Restart"]:
         assert token in text
+    assert "BoundaryConditions.fields:     'SpeciesBC_?ADV?             '," in text
+    assert "GIGCchem" not in text
     for forbidden in ["CloudConvFlux", "StateMet", "RadioNuclide"]:
         assert forbidden not in text
 
