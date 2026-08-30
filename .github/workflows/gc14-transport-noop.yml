@@ -1,0 +1,200 @@
+name: gc14-transport-audit-noop
+
+on:
+  push:
+    branches:
+      - gc14-7-1-reference-producer-v1
+    paths:
+      - .github/workflows/gc14-transport-noop.yml
+      - config/instrumented_gcclassic_build.json
+      - scripts/compare_gc_scientific_outputs.py
+      - scripts/configure_instantaneous_outputs.py
+      - scripts/pack_transport_audit.py
+      - scripts/validate_transport_audit.py
+      - scripts/create_nested_noop_rundir.sh
+      - scripts/configure_nested_boundary_conditions.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  WORKROOT: /tmp/gc14-transport-noop
+  PYTHONUNBUFFERED: "1"
+
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Checkout control repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libnetcdf-dev libnetcdff-dev netcdf-bin
+          python -m pip install --upgrade numpy netCDF4 pyyaml
+          command -v aws
+      - name: Read baseline and instrumented build pins
+        id: pins
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          base=json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          inst=json.loads(Path('config/instrumented_gcclassic_build.json').read_text())
+          vals={'base_run':base['build_run_id'],'base_artifact':base['artifact_name'],'base_bundle':base['bundle_filename'],'base_bundle_sha':base['bundle_sha256'],'base_exe_sha':base['executable_sha256'],'inst_run':inst['build_run_id'],'inst_artifact':inst['artifact_name'],'inst_exe_sha':inst['executable_sha256']}
+          for k,v in vals.items(): print(f'{k}={v}')
+          PY
+      - name: Download frozen baseline build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pins.outputs.base_artifact }}
+          path: ${{ env.WORKROOT }}/baseline-download
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pins.outputs.base_run }}
+      - name: Download instrumented build
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ steps.pins.outputs.inst_artifact }}
+          path: ${{ env.WORKROOT }}/instrumented
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.pins.outputs.inst_run }}
+      - name: Restore and verify both executables
+        run: |
+          set -euo pipefail
+          mkdir -p "$WORKROOT/frozen" "$WORKROOT/ExtData"
+          DL="$WORKROOT/baseline-download"; BUNDLE="${{ steps.pins.outputs.base_bundle }}"
+          echo "${{ steps.pins.outputs.base_bundle_sha }}  $DL/$BUNDLE" | sha256sum -c -
+          tar -xzf "$DL/$BUNDLE" -C "$WORKROOT/frozen"
+          BASE="$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers/gcclassic"
+          INST="$WORKROOT/instrumented/gcclassic"
+          test "$(sha256sum "$BASE"|awk '{print $1}')" = "${{ steps.pins.outputs.base_exe_sha }}"
+          test "$(sha256sum "$INST"|awk '{print $1}')" = "${{ steps.pins.outputs.inst_exe_sha }}"
+          mkdir -p "$HOME/.geoschem"
+          printf 'export GC_DATA_ROOT=%s\nexport GC_USER_REGISTERED=true\n' "$WORKROOT/ExtData" > "$HOME/.geoschem/config"
+          echo "GC_DATA_ROOT=$WORKROOT/ExtData" >> "$GITHUB_ENV"
+          echo "GC_USER_REGISTERED=true" >> "$GITHUB_ENV"
+      - name: Prepare GLOBAL A/B/C identical configurations
+        run: |
+          set -euo pipefail
+          ROOT="$WORKROOT/global"; TEMPLATE="$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers"
+          rm -rf "$ROOT"; mkdir -p "$ROOT"; cp -a "$TEMPLATE" "$ROOT/A"
+          rm -rf "$ROOT/A/OutputDir" "$ROOT/A/Restarts"; mkdir -p "$ROOT/A/OutputDir" "$ROOT/A/Restarts"
+          python scripts/configure_reference_case.py --rundir "$ROOT/A" --case-id GCNOOP_GLOBAL_JJA_20190701_V1 --start 20190701T000000 --end 20190701T010000
+          python scripts/configure_instantaneous_outputs.py "$ROOT/A/HISTORY.rc" --seconds 600
+          cp -a "$ROOT/A" "$ROOT/B"; cp -a "$ROOT/A" "$ROOT/C"
+          cp "$WORKROOT/instrumented/gcclassic" "$ROOT/B/gcclassic"; cp "$WORKROOT/instrumented/gcclassic" "$ROOT/C/gcclassic"
+          chmod +x "$ROOT/B/gcclassic" "$ROOT/C/gcclassic"
+          for x in A B C; do rm -rf "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"; mkdir -p "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"; done
+          for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc; do cmp "$ROOT/A/$f" "$ROOT/B/$f"; cmp "$ROOT/B/$f" "$ROOT/C/$f"; done
+          grep -q "SpeciesConc.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+          grep -q "StateMet.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+          grep -q "StateMetLevEdge.mode:.*'instantaneous'" "$ROOT/A/HISTORY.rc"
+      - name: Download official GLOBAL inputs once
+        run: |
+          cd "$WORKROOT/global/A"; ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"; bash scripts/download_official_inputs.sh "$WORKROOT/global/A" geoschem+aws
+      - name: Run GLOBAL A/B/C
+        run: |
+          set -euo pipefail
+          cd "$WORKROOT/global/A"; env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          cd "$WORKROOT/global/B"; env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          mkdir -p "$WORKROOT/global/C/audit_raw"; cd "$WORKROOT/global/C"
+          GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH="$WORKROOT/global/C/audit_raw" ./gcclassic > GC.log 2>&1
+          cd "$GITHUB_WORKSPACE"
+          python scripts/pack_transport_audit.py "$WORKROOT/global/C/audit_raw" "$WORKROOT/global/C/transport_audit.nc4"
+          python scripts/validate_transport_audit.py "$WORKROOT/global/C/transport_audit.nc4" --domain GLOBAL_LATLON --expected-steps 6 --expected-dt 600 --json-out "$WORKROOT/global/C/transport_audit_validation.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/A" "$WORKROOT/global/B" --output "$WORKROOT/global/A_vs_B.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/B" "$WORKROOT/global/C" --output "$WORKROOT/global/B_vs_C.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/global/A" "$WORKROOT/global/C" --output "$WORKROOT/global/A_vs_C.json"
+      - name: Produce canonical GLOBAL BoundaryConditions
+        id: bc
+        run: |
+          set -euo pipefail
+          BCROOT="$WORKROOT/bc-producer"; cp -a "$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers" "$BCROOT"
+          rm -rf "$BCROOT/OutputDir" "$BCROOT/Restarts"; mkdir -p "$BCROOT/OutputDir" "$BCROOT/Restarts"
+          python scripts/configure_reference_case.py --rundir "$BCROOT" --case-id GCNOOP_BC_GLOBAL_JJA_20190701_V1 --start 20190701T000000 --end 20190701T030000
+          python scripts/configure_instantaneous_outputs.py "$BCROOT/HISTORY.rc" --seconds 600 --boundary-conditions
+          cd "$BCROOT"; ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"; bash scripts/download_official_inputs.sh "$BCROOT" geoschem+aws
+          cd "$BCROOT"; ./gcclassic > GC.log 2>&1
+          mapfile -t bcs < <(find OutputDir -maxdepth 1 -type f -name 'GEOSChem.BoundaryConditions.*.nc4' | sort); test "${#bcs[@]}" -ge 1
+          BC=$(realpath "${bcs[0]}"); grep -q 'SpeciesBC_PassiveTracer' <(ncdump -h "$BC")
+          echo "path=$BC" >> "$GITHUB_OUTPUT"; echo "sha256=$(sha256sum "$BC"|awk '{print $1}')" >> "$GITHUB_OUTPUT"
+      - name: Prepare NESTED A/B/C identical configurations
+        run: |
+          set -euo pipefail
+          PARENT="$WORKROOT/nested-template"; mkdir -p "$PARENT"
+          TEMPLATE=$(bash scripts/create_nested_noop_rundir.sh "$WORKROOT/frozen/GCClassic" "$WORKROOT/ExtData" "$PARENT" | tail -n 1)
+          cp "$WORKROOT/frozen/rundirs/gc_4x5_merra2_TransportTracers/gcclassic" "$TEMPLATE/gcclassic"; chmod +x "$TEMPLATE/gcclassic"
+          python scripts/configure_instantaneous_outputs.py "$TEMPLATE/HISTORY.rc" --seconds 300
+          python scripts/configure_nested_boundary_conditions.py --hemco "$TEMPLATE/HEMCO_Config.rc" --boundary-file "${{ steps.bc.outputs.path }}"
+          ROOT="$WORKROOT/nested"; rm -rf "$ROOT"; mkdir -p "$ROOT"; cp -a "$TEMPLATE" "$ROOT/A"; cp -a "$TEMPLATE" "$ROOT/B"; cp -a "$TEMPLATE" "$ROOT/C"
+          cp "$WORKROOT/instrumented/gcclassic" "$ROOT/B/gcclassic"; cp "$WORKROOT/instrumented/gcclassic" "$ROOT/C/gcclassic"; chmod +x "$ROOT/B/gcclassic" "$ROOT/C/gcclassic"
+          for x in A B C; do rm -rf "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"; mkdir -p "$ROOT/$x/OutputDir" "$ROOT/$x/Restarts"; done
+          for f in geoschem_config.yml HEMCO_Config.rc HISTORY.rc; do cmp "$ROOT/A/$f" "$ROOT/B/$f"; cmp "$ROOT/B/$f" "$ROOT/C/$f"; done
+          test "$(sha256sum "${{ steps.bc.outputs.path }}"|awk '{print $1}')" = "${{ steps.bc.outputs.sha256 }}"
+      - name: Download official NESTED inputs once
+        run: |
+          cd "$WORKROOT/nested/A"; ./gcclassic --dryrun > log.dryrun 2>&1
+          cd "$GITHUB_WORKSPACE"; bash scripts/download_official_inputs.sh "$WORKROOT/nested/A" nested+aws
+      - name: Run NESTED A/B/C
+        run: |
+          set -euo pipefail
+          cd "$WORKROOT/nested/A"; env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          cd "$WORKROOT/nested/B"; env -u GC_TRANSPORT_AUDIT -u GC_TRANSPORT_AUDIT_PATH ./gcclassic > GC.log 2>&1
+          mkdir -p "$WORKROOT/nested/C/audit_raw"; cd "$WORKROOT/nested/C"
+          GC_TRANSPORT_AUDIT=1 GC_TRANSPORT_AUDIT_PATH="$WORKROOT/nested/C/audit_raw" ./gcclassic > GC.log 2>&1
+          cd "$GITHUB_WORKSPACE"
+          python scripts/pack_transport_audit.py "$WORKROOT/nested/C/audit_raw" "$WORKROOT/nested/C/transport_audit.nc4"
+          python scripts/validate_transport_audit.py "$WORKROOT/nested/C/transport_audit.nc4" --domain GEOSCHEM_NESTED_REGIONAL --expected-steps 12 --expected-dt 300 --json-out "$WORKROOT/nested/C/transport_audit_validation.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/A" "$WORKROOT/nested/B" --output "$WORKROOT/nested/A_vs_B.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/B" "$WORKROOT/nested/C" --output "$WORKROOT/nested/B_vs_C.json"
+          python scripts/compare_gc_scientific_outputs.py "$WORKROOT/nested/A" "$WORKROOT/nested/C" --output "$WORKROOT/nested/A_vs_C.json"
+      - name: Build final no-op qualification record
+        env:
+          BC_FILE: ${{ steps.bc.outputs.path }}
+        run: |
+          mkdir -p "$WORKROOT/evidence"
+          python - <<'PY'
+          import hashlib,json,os,pathlib
+          r=pathlib.Path('/tmp/gc14-transport-noop'); load=lambda p:json.loads(pathlib.Path(p).read_text())
+          checks={'global_A_vs_B':load(r/'global/A_vs_B.json')['status'],'global_B_vs_C':load(r/'global/B_vs_C.json')['status'],'global_A_vs_C':load(r/'global/A_vs_C.json')['status'],'global_audit':load(r/'global/C/transport_audit_validation.json')['status'],'nested_A_vs_B':load(r/'nested/A_vs_B.json')['status'],'nested_B_vs_C':load(r/'nested/B_vs_C.json')['status'],'nested_A_vs_C':load(r/'nested/A_vs_C.json')['status'],'nested_audit':load(r/'nested/C/transport_audit_validation.json')['status']}
+          bc=pathlib.Path(os.environ['BC_FILE']); ok=all(v=='PASS' for v in checks.values())
+          result={'schema_id':'GC14_7_1_TRANSPORT_DIAGNOSTIC_NOOP_QUALIFICATION_V1','status':'PASS' if ok else 'FAIL','comparison_rule':'EXACT_ELEMENTWISE_SCIENTIFIC_ARRAY_EQUALITY','baseline_executable_sha256':'${{ steps.pins.outputs.base_exe_sha }}','instrumented_executable_sha256':'${{ steps.pins.outputs.inst_exe_sha }}','global':{'expected_steps':6,'runtime_dt_s':600},'nested':{'case_id':'GCNOOP_NESTED_EU_JJA_20190701_V1','expected_steps':12,'runtime_dt_s':300},'bc_sha256':hashlib.sha256(bc.read_bytes()).hexdigest(),'checks':checks,'scientific_thresholds_modified':False}
+          out=r/'evidence/noop_qualification.json'; out.write_text(json.dumps(result,indent=2,sort_keys=True)+'\n'); print(out.read_text())
+          if not ok: raise SystemExit('no-op qualification failed')
+          PY
+      - name: Hash qualification evidence
+        if: always()
+        run: |
+          mkdir -p "$WORKROOT/evidence"
+          find "$WORKROOT/global" "$WORKROOT/nested" "$WORKROOT/evidence" -type f \( -name '*_vs_*.json' -o -name 'transport_audit*.nc4' -o -name 'transport_audit*json' -o -name 'noop_qualification.json' \) -print0 | sort -z | xargs -0 -r sha256sum > "$WORKROOT/evidence/SHA256SUMS"
+          printf 'baseline_executable=%s\ninstrumented_executable=%s\nbc_sha256=%s\n' '${{ steps.pins.outputs.base_exe_sha }}' '${{ steps.pins.outputs.inst_exe_sha }}' '${{ steps.bc.outputs.sha256 }}' > "$WORKROOT/evidence/IDENTITY.txt"
+      - name: Upload no-op qualification evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gc14-transport-audit-noop-${{ github.run_id }}
+          path: |
+            /tmp/gc14-transport-noop/evidence/
+            /tmp/gc14-transport-noop/global/*_vs_*.json
+            /tmp/gc14-transport-noop/global/C/transport_audit.nc4
+            /tmp/gc14-transport-noop/global/C/transport_audit.manifest.json
+            /tmp/gc14-transport-noop/global/C/transport_audit_validation.json
+            /tmp/gc14-transport-noop/global/*/GC.log
+            /tmp/gc14-transport-noop/nested/*_vs_*.json
+            /tmp/gc14-transport-noop/nested/C/transport_audit.nc4
+            /tmp/gc14-transport-noop/nested/C/transport_audit.manifest.json
+            /tmp/gc14-transport-noop/nested/C/transport_audit_validation.json
+            /tmp/gc14-transport-noop/nested/*/GC.log
+          if-no-files-found: ignore
+          compression-level: 0
+          retention-days: 90
