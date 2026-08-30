@@ -106,8 +106,10 @@ jobs:
           EOF
           python - <<'PY'
           import json
+          import os
           from pathlib import Path
-          pin = json.loads(Path('config/frozen_gcclassic_build.json').read_text())
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          pin = json.loads((workspace / 'config/frozen_gcclassic_build.json').read_text())
           manifest = json.loads(Path('/tmp/gc14-reference/frozen_build_manifest.json').read_text())
           assert manifest['build_run_id'] == pin['build_run_id']
           assert manifest['gcclassic_version'] == pin['gcclassic_version']
