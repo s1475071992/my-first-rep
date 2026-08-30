@@ -46,6 +46,13 @@ def test_rundir_script_uses_official_creator_and_dryrun_only_contract():
     assert "gcclassic --dryrun" not in text, "creation script must not run the model"
 
 
+def test_nested_eu_ocean_mask_uses_regional_constants_file():
+    text = CREATE.read_text()
+    assert "OCEAN_MASK" in text
+    assert "CN.$RES.EU.$NC" in text
+    assert "CN.$RES.$NC" in text
+
+
 def test_audit_script_classifies_required_input_families():
     assert AUDIT.exists(), "missing scripts/audit_nested_dryrun.py"
     text = AUDIT.read_text()
