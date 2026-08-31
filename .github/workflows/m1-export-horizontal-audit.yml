@@ -49,7 +49,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf m1-vertical-evidence
+          rm -rf m1-vertical-evidence m1-vertical-timing-evidence.tar m1-vertical-part-*
           mkdir -p m1-vertical-evidence
           docker run --rm \
             -e FINAL_IMAGE="$FINAL_IMAGE" \
@@ -58,7 +58,6 @@ jobs:
             --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
           set -euo pipefail
           mkdir -p /out/global/OutputDir /out/global/Restarts /out/nested/OutputDir /out/nested/Restarts
-
           for case in global nested; do
             src="/checkpoint/$case/C"
             cp "$src/transport_audit.nc4" "/out/$case/transport_audit.nc4"
@@ -70,12 +69,10 @@ jobs:
             cp "$src"/OutputDir/*.nc4 "/out/$case/OutputDir/"
             cp "$src"/Restarts/* "/out/$case/Restarts/"
           done
-
           python3 - <<"PY"
           import hashlib, json, os
           from pathlib import Path
           from netCDF4 import Dataset
-
           root=Path("/out")
           def sha256(p):
               h=hashlib.sha256()
@@ -83,32 +80,51 @@ jobs:
                   for b in iter(lambda:f.read(1024*1024), b""):
                       h.update(b)
               return h.hexdigest()
-          summary={
-            "final_image": os.environ["FINAL_IMAGE"],
-            "control_repo_sha": os.environ["PINNED_CONTROL_SHA"],
-            "cases": {}
-          }
+          summary={"final_image":os.environ["FINAL_IMAGE"],"control_repo_sha":os.environ["PINNED_CONTROL_SHA"],"cases":{}}
           for name in ["global","nested"]:
               p=root/name/"transport_audit.nc4"
               with Dataset(p) as ds:
                   summary["cases"][name]={
-                    "sha256": sha256(p),
-                    "schema_id": str(ds.getncattr("schema_id")),
-                    "domain_kind": str(ds.getncattr("domain_kind")),
-                    "variables": {k:{"dimensions":list(v.dimensions),"shape":list(v.shape),"dtype":str(v.dtype),"units":getattr(v,"units",None)} for k,v in ds.variables.items()},
-                    "global_attributes": {a:str(ds.getncattr(a)) for a in ds.ncattrs()},
+                    "sha256":sha256(p),
+                    "schema_id":str(ds.getncattr("schema_id")),
+                    "domain_kind":str(ds.getncattr("domain_kind")),
+                    "variables":{k:{"dimensions":list(v.dimensions),"shape":list(v.shape),"dtype":str(v.dtype),"units":getattr(v,"units",None)} for k,v in ds.variables.items()},
+                    "global_attributes":{a:str(ds.getncattr(a)) for a in ds.ncattrs()},
                   }
           (root/"EXPORT_SUMMARY.json").write_text(json.dumps(summary,indent=2,sort_keys=True)+"\n")
           PY
           cd /out
           find . -type f ! -name EXPORT_SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > EXPORT_SHA256SUMS.txt
-          du -sh .
           '
+          tar -cf m1-vertical-timing-evidence.tar m1-vertical-evidence
+          sha256sum m1-vertical-timing-evidence.tar > m1-vertical-timing-evidence.tar.sha256
+          split -b 300M -d -a 2 m1-vertical-timing-evidence.tar m1-vertical-part-
+          ls -lh m1-vertical-part-* m1-vertical-timing-evidence.tar.sha256
 
-      - name: Upload M1 vertical timing evidence
+      - name: Upload part 00
         uses: actions/upload-artifact@v4
-        with:
-          name: m1-vertical-timing-evidence-${{ github.run_id }}
-          path: m1-vertical-evidence/
-          compression-level: 0
-          retention-days: 30
+        with: {name: m1-vertical-part-00-${{ github.run_id }}, path: m1-vertical-part-00, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 01
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-01-${{ github.run_id }}, path: m1-vertical-part-01, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 02
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-02-${{ github.run_id }}, path: m1-vertical-part-02, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 03
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-03-${{ github.run_id }}, path: m1-vertical-part-03, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 04
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-04-${{ github.run_id }}, path: m1-vertical-part-04, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 05
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-05-${{ github.run_id }}, path: m1-vertical-part-05, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 06
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-06-${{ github.run_id }}, path: m1-vertical-part-06, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload part 07
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-part-07-${{ github.run_id }}, path: m1-vertical-part-07, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+      - name: Upload tar digest
+        uses: actions/upload-artifact@v4
+        with: {name: m1-vertical-tar-digest-${{ github.run_id }}, path: m1-vertical-timing-evidence.tar.sha256, compression-level: 0, retention-days: 30}
