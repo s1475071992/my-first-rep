@@ -18,13 +18,14 @@ env:
 jobs:
   export-step0:
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - name: Checkout evidence branch
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Assert branch only adds evidence workflow
+      - name: Assert branch only changes evidence workflow
         shell: bash
         run: |
           set -euo pipefail
@@ -44,88 +45,70 @@ jobs:
       - name: Pull immutable final checkpoint image
         run: docker pull "$FINAL_IMAGE"
 
-      - name: Export compact step-0 horizontal audit evidence
+      - name: Export frozen vertical and timing evidence
         shell: bash
         run: |
           set -euo pipefail
-          rm -rf m1-evidence
-          mkdir -p m1-evidence
+          rm -rf m1-vertical-evidence
+          mkdir -p m1-vertical-evidence
           docker run --rm \
             -e FINAL_IMAGE="$FINAL_IMAGE" \
             -e PINNED_CONTROL_SHA="$PINNED_CONTROL_SHA" \
-            -v "$PWD/m1-evidence:/out" \
+            -v "$PWD/m1-vertical-evidence:/out" \
             --entrypoint /bin/bash "$FINAL_IMAGE" -lc '
           set -euo pipefail
+          mkdir -p /out/global/OutputDir /out/global/Restarts /out/nested/OutputDir /out/nested/Restarts
+
+          for case in global nested; do
+            src="/checkpoint/$case/C"
+            cp "$src/transport_audit.nc4" "/out/$case/transport_audit.nc4"
+            cp "$src/transport_audit.manifest.json" "/out/$case/transport_audit.manifest.json"
+            cp "$src/transport_audit_validation.json" "/out/$case/transport_audit_validation.json"
+            cp "$src/HISTORY.rc" "/out/$case/HISTORY.rc"
+            cp "$src/REFERENCE_CASE.json" "/out/$case/REFERENCE_CASE.json"
+            if test -f "$src/REFERENCE_TIME_WINDOW.txt"; then cp "$src/REFERENCE_TIME_WINDOW.txt" "/out/$case/REFERENCE_TIME_WINDOW.txt"; fi
+            cp "$src"/OutputDir/*.nc4 "/out/$case/OutputDir/"
+            cp "$src"/Restarts/* "/out/$case/Restarts/"
+          done
+
           python3 - <<"PY"
           import hashlib, json, os
           from pathlib import Path
-          import numpy as np
           from netCDF4 import Dataset
 
-          OUT=Path("/out")
-          cases={
-              "global": Path("/checkpoint/global/C/transport_audit.nc4"),
-              "asia": Path("/checkpoint/nested/C/transport_audit.nc4"),
-          }
-
-          def sha256(path: Path) -> str:
+          root=Path("/out")
+          def sha256(p):
               h=hashlib.sha256()
-              with path.open("rb") as f:
-                  for chunk in iter(lambda:f.read(1024*1024), b""):
-                      h.update(chunk)
+              with open(p,"rb") as f:
+                  for b in iter(lambda:f.read(1024*1024), b""):
+                      h.update(b)
               return h.hexdigest()
-
-          meta={}
-          for name,path in cases.items():
-              validation=path.with_name("transport_audit_validation.json")
-              with Dataset(path) as ds:
-                  x=np.asarray(ds.variables["xmass_pjc_tpcore_hpa_step"][0], dtype=np.float64)
-                  y=np.asarray(ds.variables["ymass_pjc_tpcore_hpa_step"][0], dtype=np.float64)
-                  record={
-                      "final_image": os.environ["FINAL_IMAGE"],
-                      "control_repo_sha": os.environ["PINNED_CONTROL_SHA"],
-                      "audit_schema_id": str(ds.getncattr("schema_id")),
-                      "domain": str(ds.getncattr("domain_kind")),
-                      "vertical_order": str(ds.getncattr("lev_tpcore")),
-                      "vertical_operator_kind": str(ds.getncattr("vertical_operator_kind")),
-                      "runtime_dt_s": float(ds.variables["runtime_dt_s"][0]),
-                      "step_id": int(ds.variables["step_id"][0]),
-                      "native_quantity_id": "GC_TPCORE_PRESSURE_INCREMENT_HPA_PER_CALL",
-                      "source_transport_audit_sha256": sha256(path),
-                      "source_transport_audit_validation_sha256": sha256(validation),
-                      "source_transport_audit_validation": json.loads(validation.read_text()),
-                      "xmass_shape": list(x.shape),
-                      "ymass_shape": list(y.shape),
-                      "source_fp_bytes": int(ds.getncattr("source_fp_bytes")),
-                      "source_byte_order": str(ds.getncattr("source_byte_order")),
+          summary={
+            "final_image": os.environ["FINAL_IMAGE"],
+            "control_repo_sha": os.environ["PINNED_CONTROL_SHA"],
+            "cases": {}
+          }
+          for name in ["global","nested"]:
+              p=root/name/"transport_audit.nc4"
+              with Dataset(p) as ds:
+                  summary["cases"][name]={
+                    "sha256": sha256(p),
+                    "schema_id": str(ds.getncattr("schema_id")),
+                    "domain_kind": str(ds.getncattr("domain_kind")),
+                    "variables": {k:{"dimensions":list(v.dimensions),"shape":list(v.shape),"dtype":str(v.dtype),"units":getattr(v,"units",None)} for k,v in ds.variables.items()},
+                    "global_attributes": {a:str(ds.getncattr(a)) for a in ds.ncattrs()},
                   }
-                  if name == "asia":
-                      record["nested_domain"]="Asia"
-                      record["buffer_cells"]={
-                          "west": int(ds.getncattr("west_buffer")),
-                          "east": int(ds.getncattr("east_buffer")),
-                          "south": int(ds.getncattr("south_buffer")),
-                          "north": int(ds.getncattr("north_buffer")),
-                      }
-                      record["transport_window_gc"]={
-                          "i_start_gc": int(ds.getncattr("i_start_gc")),
-                          "i_end_gc": int(ds.getncattr("i_end_gc")),
-                          "j_start_gc": int(ds.getncattr("j_start_gc")),
-                          "j_end_gc": int(ds.getncattr("j_end_gc")),
-                      }
-                  meta[name]=record
-              np.savez_compressed(OUT/f"{name}_step0.npz", xmass_hpa_step=x, ymass_hpa_step=y)
-          (OUT/"source_metadata.json").write_text(json.dumps(meta, indent=2, sort_keys=True)+"\n")
+          (root/"EXPORT_SUMMARY.json").write_text(json.dumps(summary,indent=2,sort_keys=True)+"\n")
           PY
+          cd /out
+          find . -type f ! -name EXPORT_SHA256SUMS.txt -print0 | sort -z | xargs -0 sha256sum > EXPORT_SHA256SUMS.txt
+          du -sh .
           '
-          (cd m1-evidence && sha256sum global_step0.npz asia_step0.npz source_metadata.json > EXPORT_SHA256SUMS.txt)
-          cat m1-evidence/source_metadata.json
-          cat m1-evidence/EXPORT_SHA256SUMS.txt
 
-      - name: Upload M1 horizontal evidence
+      - name: Upload M1 vertical timing evidence
         uses: actions/upload-artifact@v4
         with:
-          name: m1-horizontal-audit-step0-${{ github.run_id }}
-          path: m1-evidence/
-          compression-level: 6
-          retention-days: 90
+          name: m1-vertical-timing-evidence-${{ github.run_id }}
+          path: m1-vertical-evidence/
+          compression-level: 0
+          retention-days: 30
