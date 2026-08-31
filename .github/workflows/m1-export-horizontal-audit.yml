@@ -103,28 +103,72 @@ jobs:
 
       - name: Upload part 00
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-00-${{ github.run_id }}, path: m1-vertical-part-00, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-00-${{ github.run_id }}
+          path: m1-vertical-part-00
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 01
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-01-${{ github.run_id }}, path: m1-vertical-part-01, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-01-${{ github.run_id }}
+          path: m1-vertical-part-01
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 02
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-02-${{ github.run_id }}, path: m1-vertical-part-02, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-02-${{ github.run_id }}
+          path: m1-vertical-part-02
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 03
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-03-${{ github.run_id }}, path: m1-vertical-part-03, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-03-${{ github.run_id }}
+          path: m1-vertical-part-03
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 04
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-04-${{ github.run_id }}, path: m1-vertical-part-04, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-04-${{ github.run_id }}
+          path: m1-vertical-part-04
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 05
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-05-${{ github.run_id }}, path: m1-vertical-part-05, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-05-${{ github.run_id }}
+          path: m1-vertical-part-05
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 06
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-06-${{ github.run_id }}, path: m1-vertical-part-06, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-06-${{ github.run_id }}
+          path: m1-vertical-part-06
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload part 07
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-part-07-${{ github.run_id }}, path: m1-vertical-part-07, compression-level: 0, retention-days: 30, if-no-files-found: ignore}
+        with:
+          name: m1-vertical-part-07-${{ github.run_id }}
+          path: m1-vertical-part-07
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: ignore
       - name: Upload tar digest
         uses: actions/upload-artifact@v4
-        with: {name: m1-vertical-tar-digest-${{ github.run_id }}, path: m1-vertical-timing-evidence.tar.sha256, compression-level: 0, retention-days: 30}
+        with:
+          name: m1-vertical-tar-digest-${{ github.run_id }}
+          path: m1-vertical-timing-evidence.tar.sha256
+          compression-level: 0
+          retention-days: 30
