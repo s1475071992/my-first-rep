@@ -1,0 +1,72 @@
+name: Encode Google Restaurants reviews (12 shards)
+
+on:
+  push:
+    branches:
+      - reputation-embedding-run
+    paths:
+      - '.github/workflows/embed-google-12shards.yml'
+
+jobs:
+  encode-shard:
+    strategy:
+      fail-fast: false
+      max-parallel: 12
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      TOKENIZERS_PARALLELISM: 'true'
+      SHARD_ID: ${{ matrix.shard }}
+      NUM_SHARDS: '12'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install CPU embedding stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+          pip install sentence-transformers==3.4.1 numpy requests
+      - name: Download source data
+        run: |
+          mkdir -p data artifacts
+          curl -fL --retry 5 --retry-delay 3 \
+            'https://datarepo.eng.ucsd.edu/mcauley_group/gdrive/googlelocal_restaurants/filter_all_t.json' \
+            -o data/filter_all_t.json \
+          || curl -fL --retry 5 --retry-delay 3 \
+            'https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal_restaurants/filter_all_t.json' \
+            -o data/filter_all_t.json
+      - name: Encode shard
+        run: |
+          python - <<'PY'
+          import json, os
+          import numpy as np
+          from sentence_transformers import SentenceTransformer
+          shard=int(os.environ['SHARD_ID']); nshards=int(os.environ['NUM_SHARDS'])
+          with open('data/filter_all_t.json', encoding='utf-8') as f: data=json.load(f)
+          lookup={}
+          for split in ('train','val','test'):
+              for item in data[split]:
+                  lookup.setdefault(f"{item['user_id']}_{item['business_id']}", item['review_text'])
+                  for k,t in item.get('history_reviews',[]): lookup.setdefault(k,t)
+          all_keys=list(lookup)
+          keys=[k for i,k in enumerate(all_keys) if i % nshards == shard]
+          texts=[lookup[k] for k in keys]
+          print(f'shard={shard}/{nshards} total={len(all_keys)} n={len(keys)}', flush=True)
+          model_name='sentence-transformers/all-mpnet-base-v2'
+          model=SentenceTransformer(model_name, device='cpu')
+          emb=model.encode(texts,batch_size=64,show_progress_bar=True,convert_to_numpy=True,normalize_embeddings=True).astype(np.float16)
+          np.savez_compressed(f'artifacts/google_mpnet_12shard_{shard}.npz',keys=np.asarray(keys),embeddings=emb,shard=np.asarray([shard]),num_shards=np.asarray([nshards]),model=np.asarray([model_name]))
+          print('saved', emb.shape, emb.dtype, flush=True)
+          PY
+      - name: Upload shard
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-mpnet-12shard-${{ matrix.shard }}
+          path: artifacts/google_mpnet_12shard_${{ matrix.shard }}.npz
+          if-no-files-found: error
+          retention-days: 7
