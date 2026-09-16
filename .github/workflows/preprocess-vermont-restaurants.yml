@@ -1,0 +1,35 @@
+name: Preprocess Vermont temporal restaurants
+
+on:
+  push:
+    branches: [temporal-world-model]
+    paths:
+      - 'temporal_preprocess.py'
+      - '.github/workflows/preprocess-vermont-restaurants.yml'
+
+jobs:
+  preprocess:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Vermont 10-core reviews and metadata
+        run: |
+          curl -L --retry 5 --fail -o review-Vermont_10.json.gz https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/review-Vermont_10.json.gz
+          curl -L --retry 5 --fail -o meta-Vermont.json.gz https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/meta-Vermont.json.gz
+          ls -lh review-Vermont_10.json.gz meta-Vermont.json.gz
+      - name: Filter restaurant reviews and audit graph density
+        run: |
+          python temporal_preprocess.py \
+            --meta meta-Vermont.json.gz \
+            --reviews review-Vermont_10.json.gz \
+            --output vermont_restaurants_temporal.jsonl.gz \
+            --audit vermont_restaurants_audit.json
+      - name: Upload temporal restaurant subset
+        uses: actions/upload-artifact@v4
+        with:
+          name: vermont-restaurants-temporal
+          path: |
+            vermont_restaurants_temporal.jsonl.gz
+            vermont_restaurants_audit.json
+          retention-days: 7
