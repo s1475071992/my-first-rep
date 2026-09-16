@@ -1,0 +1,66 @@
+name: Encode Vermont temporal restaurant reviews
+
+on:
+  push:
+    branches: [temporal-world-model]
+    paths:
+      - 'encode_vermont.py'
+      - '.github/workflows/embed-vermont-temporal.yml'
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download Vermont 10-core reviews and metadata
+        run: |
+          curl -L --retry 5 --fail -o review-Vermont_10.json.gz https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/review-Vermont_10.json.gz
+          curl -L --retry 5 --fail -o meta-Vermont.json.gz https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal/meta-Vermont.json.gz
+      - name: Build restaurant text subset
+        run: |
+          python temporal_preprocess.py \
+            --meta meta-Vermont.json.gz \
+            --reviews review-Vermont_10.json.gz \
+            --output vermont_restaurants_temporal.jsonl.gz \
+            --audit vermont_restaurants_audit.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vermont-filtered-input
+          path: |
+            vermont_restaurants_temporal.jsonl.gz
+            vermont_restaurants_audit.json
+          retention-days: 7
+
+  encode:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0,1,2,3,4,5,6,7]
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: vermont-filtered-input
+      - name: Install CPU embedding stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch
+          pip install sentence-transformers
+      - name: Encode shard
+        run: |
+          python encode_vermont.py \
+            --input vermont_restaurants_temporal.jsonl.gz \
+            --output vermont_mpnet_shard_${{ matrix.shard }}.npz \
+            --shard ${{ matrix.shard }} --num-shards 8 --batch-size 64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vermont-mpnet-shard-${{ matrix.shard }}
+          path: vermont_mpnet_shard_${{ matrix.shard }}.npz
+          retention-days: 7
