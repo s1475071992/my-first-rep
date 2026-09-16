@@ -1,0 +1,74 @@
+name: Encode Google Restaurants reviews
+
+on:
+  push:
+    branches:
+      - reputation-embedding-run
+    paths:
+      - 'embedding/**'
+      - '.github/workflows/embed-google-restaurants.yml'
+
+jobs:
+  encode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      HF_HOME: ${{ github.workspace }}/.hf-cache
+      TOKENIZERS_PARALLELISM: 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install CPU embedding stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.5.1
+          pip install sentence-transformers==3.4.1 numpy requests
+
+      - name: Download Google Restaurants filtered dataset
+        run: |
+          mkdir -p data
+          curl -fL --retry 5 --retry-delay 3 \
+            'https://datarepo.eng.ucsd.edu/mcauley_group/gdrive/googlelocal_restaurants/filter_all_t.json' \
+            -o data/filter_all_t.json \
+          || curl -fL --retry 5 --retry-delay 3 \
+            'https://mcauleylab.ucsd.edu/public_datasets/gdrive/googlelocal_restaurants/filter_all_t.json' \
+            -o data/filter_all_t.json
+          ls -lh data/filter_all_t.json
+
+      - name: Validate source data
+        run: |
+          python - <<'PY'
+          import json
+          with open('data/filter_all_t.json', encoding='utf-8') as f:
+              d = json.load(f)
+          assert set(d) >= {'train', 'val', 'test'}
+          print({k: len(d[k]) for k in ('train', 'val', 'test')})
+          assert sum(len(d[k]) for k in ('train','val','test')) > 100000
+          PY
+
+      - name: Encode reviews with all-mpnet-base-v2
+        run: |
+          python embedding/encode_google.py \
+            --data data/filter_all_t.json \
+            --output artifacts/google_all_mpnet_embeddings.npz \
+            --model sentence-transformers/all-mpnet-base-v2 \
+            --batch-size 64
+
+      - name: Inspect manifest
+        run: cat artifacts/google_all_mpnet_embeddings.manifest.json
+
+      - name: Upload embeddings
+        uses: actions/upload-artifact@v4
+        with:
+          name: google-all-mpnet-embeddings
+          path: |
+            artifacts/google_all_mpnet_embeddings.npz
+            artifacts/google_all_mpnet_embeddings.manifest.json
+          if-no-files-found: error
+          retention-days: 7
